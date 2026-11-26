@@ -146,6 +146,22 @@ We use Doxygen syntax.
 - All CI jobs must pass before a merge.
 - Add or update tests and documentation with the code. A new limitation belongs in the README.
 
+## Releasing
+
+A release is a version tag; the `Release` workflow does the rest.
+
+1. Set the version in `project(cppmcache VERSION …)` in `CMakeLists.txt`, in a pull request. The
+   same pull request runs the release workflow as a dry run: it builds the three packages and tests
+   each one, and publishes nothing.
+2. Once merged, tag that commit `vX.Y.Z` and push the tag. The tag must match the version of the
+   project, or the workflow stops.
+3. The workflow builds the binaries with their C++ runtime linked statically, runs the unpacked
+   binary of each archive through the modules integration test, runs the Linux one on stock
+   runners, then publishes the archives, `SHA256SUMS` and a build provenance attestation.
+
+The action at the root of the repository (`action.yml`) installs those archives. CI exercises it
+against the latest release.
+
 ## Reporting bugs
 
 Open an issue with the template. The most useful attachment is the relevant lines of a

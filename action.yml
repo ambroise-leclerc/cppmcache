@@ -1,0 +1,139 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Ambroise Leclerc
+
+name: Set up cppmcache
+description: Install a released cppmcache, the compiler cache that understands C++ modules, and keep its cache between runs
+author: Ambroise Leclerc
+branding:
+  icon: zap
+  color: blue
+
+inputs:
+  version:
+    description: Version to install, such as 0.1.0, or "latest".
+    default: latest
+  cache:
+    description: Keep the cache directory between workflow runs with actions/cache ("true" or "false").
+    default: "true"
+  cache-key:
+    description: >-
+      Text added to the key of the saved cache. Give jobs that must not share a cache different values, for example
+      the compiler of a matrix job.
+    default: ""
+  base-directory:
+    description: >-
+      Directory under which absolute paths are made relative (CPPMCACHE_BASEDIR), so that the cache does not depend
+      on where the runner checked the project out. Empty to leave relocation off.
+    default: ${{ github.workspace }}
+  remote:
+    description: URL of a remote cache (CPPMCACHE_REMOTE), such as http://cache.example:8080. Empty for none.
+    default: ""
+  token:
+    description: Token used to look up the latest release.
+    default: ${{ github.token }}
+
+outputs:
+  version:
+    description: The version that was installed.
+    value: ${{ steps.install.outputs.version }}
+  path:
+    description: Full path of the cppmcache executable, for CMAKE_CXX_COMPILER_LAUNCHER.
+    value: ${{ steps.install.outputs.path }}
+  cache-directory:
+    description: The cache directory (CPPMCACHE_DIR).
+    value: ${{ steps.install.outputs.cache-directory }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install cppmcache
+      id: install
+      shell: bash
+      env:
+        CPPMCACHE_SETUP_VERSION: ${{ inputs.version }}
+        CPPMCACHE_SETUP_BASE: ${{ inputs.base-directory }}
+        CPPMCACHE_SETUP_REMOTE: ${{ inputs.remote }}
+        CPPMCACHE_SETUP_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+        repository="ambroise-leclerc/cppmcache"
+
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64)   platform="linux-x86_64";   archive="tar.gz"; executable="cppmcache" ;;
+          macOS-ARM64) platform="macos-arm64";    archive="tar.gz"; executable="cppmcache" ;;
+          Windows-X64) platform="windows-x86_64"; archive="zip";    executable="cppmcache.exe" ;;
+          *)
+            echo "::error::cppmcache publishes no binary for ${RUNNER_OS} ${RUNNER_ARCH}. Build it from source instead: see the README, 'Importing it with CPM'."
+            exit 1 ;;
+        esac
+
+        version="${CPPMCACHE_SETUP_VERSION#v}"
+        if [ "$version" = "latest" ]; then
+          version="$(curl -fsSL -H "Authorization: Bearer ${CPPMCACHE_SETUP_TOKEN}" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${repository}/releases/latest" | sed -n 's/^ *"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -1)"
+          if [ -z "$version" ]; then
+            echo "::error::Could not determine the latest release of ${repository}."
+            exit 1
+          fi
+        fi
+
+        name="cppmcache-${version}-${platform}"
+        base_url="https://github.com/${repository}/releases/download/v${version}"
+        download="${RUNNER_TEMP}/cppmcache-download"
+        rm -rf "$download"
+        mkdir -p "$download"
+        curl -fsSL -o "${download}/${name}.${archive}" "${base_url}/${name}.${archive}"
+        curl -fsSL -o "${download}/SHA256SUMS" "${base_url}/SHA256SUMS"
+
+        # The archive must be the one the release workflow published.
+        expected="$(sed -n "s/^\([0-9a-f]\{64\}\)  ${name}\.${archive}\$/\1/p" "${download}/SHA256SUMS")"
+        if command -v sha256sum > /dev/null; then
+          actual="$(sha256sum "${download}/${name}.${archive}" | cut -d' ' -f1)"
+        else
+          actual="$(shasum -a 256 "${download}/${name}.${archive}" | cut -d' ' -f1)"
+        fi
+        if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+          echo "::error::Checksum mismatch for ${name}.${archive}: expected '${expected}', got '${actual}'."
+          exit 1
+        fi
+
+        install_root="${RUNNER_TOOL_CACHE:-${RUNNER_TEMP}}/cppmcache/${version}"
+        rm -rf "$install_root"
+        mkdir -p "$install_root"
+        if [ "$archive" = "zip" ]; then
+          unzip -q "${download}/${name}.zip" -d "$install_root"
+        else
+          tar -xzf "${download}/${name}.tar.gz" -C "$install_root"
+        fi
+        bin_directory="${install_root}/${name}/bin"
+        cache_directory="${RUNNER_TEMP}/cppmcache-cache"
+        mkdir -p "$cache_directory"
+
+        # Windows tools are given Windows paths.
+        native() { if command -v cygpath > /dev/null; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
+
+        "${bin_directory}/${executable}" --version
+        echo "$(native "$bin_directory")" >> "$GITHUB_PATH"
+        {
+          echo "CPPMCACHE_DIR=$(native "$cache_directory")"
+          # Runners of the same image have the same compiler, but not always with the same dates.
+          echo "CPPMCACHE_COMPILERCHECK=content"
+          if [ -n "$CPPMCACHE_SETUP_BASE" ]; then echo "CPPMCACHE_BASEDIR=${CPPMCACHE_SETUP_BASE}"; fi
+          if [ -n "$CPPMCACHE_SETUP_REMOTE" ]; then echo "CPPMCACHE_REMOTE=${CPPMCACHE_SETUP_REMOTE}"; fi
+        } >> "$GITHUB_ENV"
+        {
+          echo "version=${version}"
+          echo "path=$(native "${bin_directory}/${executable}")"
+          echo "cache-directory=$(native "$cache_directory")"
+        } >> "$GITHUB_OUTPUT"
+
+    # A new entry is saved by every run and the most recent one is restored: cppmcache has no
+    # eviction yet, so the saved cache grows until GitHub's own limits remove old entries.
+    - name: Restore and save the cache directory
+      if: inputs.cache == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/cppmcache-cache
+        key: cppmcache-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          cppmcache-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key }}-
