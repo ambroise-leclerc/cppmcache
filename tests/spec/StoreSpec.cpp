@@ -76,9 +76,9 @@ const speclab::Register fileDigests{"Storage: digest of a file and timestamp mac
                                             .Given("an ordinary header and a header that uses the date macro",
                                                    [](Sandbox& sandbox) {
                                                        fs::create_directories(sandbox.root);
-                                                       std::ofstream{sandbox.root / "plain.h"} << "int f();\n";
-                                                       std::ofstream{sandbox.root / "dated.h"} << "const char* d = __DA"
-                                                                                                  "TE__;\n";  // name split: see Store.cppm
+                                                       std::ofstream{sandbox.root / "plain.h", std::ios::binary} << "int f();\n";
+                                                       std::ofstream{sandbox.root / "dated.h", std::ios::binary} << "const char* d = __DA"
+                                                                                                                    "TE__;\n";  // name split: see Store.cppm
                                                    })
                                             .Then("the digest follows the content and the macro is reported",
                                                   [](Sandbox& sandbox) {
@@ -98,7 +98,7 @@ const speclab::Register digestMemo{"Storage: the memoised digest does not surviv
                                            .Given("a file old enough for its digest to be memoised",
                                                   [](Sandbox& sandbox) {
                                                       fs::create_directories(sandbox.root);
-                                                      std::ofstream{sandbox.root / "f.h"} << "content";
+                                                      std::ofstream{sandbox.root / "f.h", std::ios::binary} << "content";
                                                       fs::last_write_time(sandbox.root / "f.h", fs::file_time_type::clock::now() - std::chrono::hours{1});
                                                   })
                                            .Then("two reads agree, then a rewrite of the same size is seen",
@@ -106,7 +106,7 @@ const speclab::Register digestMemo{"Storage: the memoised digest does not surviv
                                                      const fs::path file   = sandbox.root / "f.h";
                                                      const auto     first  = sandbox.store.fileInfo(file);
                                                      const auto     second = sandbox.store.fileInfo(file);
-                                                     std::ofstream{file, std::ios::trunc} << "CONTENT";
+                                                     std::ofstream{file, std::ios::binary | std::ios::trunc} << "CONTENT";
                                                      fs::last_write_time(file, fs::file_time_type::clock::now() - std::chrono::minutes{30});
                                                      const auto rewritten = sandbox.store.fileInfo(file);
                                                      Checks     checks;
