@@ -66,6 +66,12 @@ the pull request which ones you ran yourself.
   cppmcache with a real compiler. Each runs in two variants: a minimal command, and the form of
   command CMake writes. The second one exists because GCC changes the content of its dependency
   file when CMake's options are present; a change that passes only the first is not finished.
+- `integration.remote.*` run several local caches against one server of Bazel's HTTP caching
+  protocol. `tests/integration/CacheServer.py` provides that server; set `CPPMCACHE_TEST_REMOTE` to
+  the URL of a real one, such as a bazel-remote, to run the same test against it.
+- Code that includes a header of the standard library, or of a library that does, must not be in a
+  translation unit that uses `import std;`. The networking code shows the pattern: one classic
+  `.cpp` file behind a header that includes nothing (`RemoteTransport.hpp`).
 - `integration.cpm-consumer` builds a small project that imports cppmcache with CPM. It guards the
   rule that cppmcache, as a subproject, sets nothing outside its own targets: keep new settings in
   `cppmcache_configure_target()` or behind `PROJECT_IS_TOP_LEVEL`.
@@ -98,7 +104,7 @@ The code is C++23, written as named modules with `import std;`.
 `.clang-format` is authoritative and CI checks it with clang-format 21:
 
 ```sh
-clang-format -i $(git ls-files 'src/*.cppm' 'src/*.cpp' 'tests/*.cpp')
+clang-format -i $(git ls-files 'src/*.cppm' 'src/*.cpp' 'src/*.hpp' 'tests/*.cpp')
 ```
 
 - Indent with 4 spaces, no tabs; lines up to 160 columns.

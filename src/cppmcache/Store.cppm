@@ -27,6 +27,10 @@ struct Config {
     fs::path log;
     bool     disable = false;
     bool     recache = false;
+    // Remote cache: an http:// URL, empty when there is none.
+    std::string remoteUrl;
+    bool        remoteReadOnly      = false;
+    int         remoteTimeoutMillis = 10'000;
 };
 
 std::optional<std::string> environment(const char* name) {
@@ -55,6 +59,16 @@ Config loadConfig() {
     }
     config.disable = environment("CPPMCACHE_DISABLE").has_value();
     config.recache = environment("CPPMCACHE_RECACHE").has_value();
+    if (const auto remote = environment("CPPMCACHE_REMOTE")) {
+        config.remoteUrl = *remote;
+    }
+    config.remoteReadOnly = environment("CPPMCACHE_REMOTE_READ_ONLY").has_value();
+    if (const auto timeout = environment("CPPMCACHE_REMOTE_TIMEOUT_MS")) {
+        int value = 0;
+        if (std::from_chars(timeout->data(), timeout->data() + timeout->size(), value).ec == std::errc{} && value > 0) {
+            config.remoteTimeoutMillis = value;
+        }
+    }
     return config;
 }
 

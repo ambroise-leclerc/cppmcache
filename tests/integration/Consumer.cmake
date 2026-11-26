@@ -20,7 +20,7 @@ file(REMOVE_RECURSE "${WORK_DIR}")
 file(MAKE_DIRECTORY "${WORK_DIR}")
 file(COPY "${SOURCE_DIR}/tests/consumer/" DESTINATION "${WORK_DIR}/source")
 set(ENVIRONMENT ${CMAKE_COMMAND} -E env "CPPMCACHE_DIR=${WORK_DIR}/cache" --unset=CPPMCACHE_DISABLE
-    --unset=CPPMCACHE_RECACHE --unset=CPPMCACHE_LOG)
+    --unset=CPPMCACHE_RECACHE --unset=CPPMCACHE_LOG --unset=CPPMCACHE_REMOTE)
 
 function(read_counter name result)
     execute_process(COMMAND ${ENVIRONMENT} "${CPPMCACHE}" --print-stats

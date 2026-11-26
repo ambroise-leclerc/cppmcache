@@ -10,13 +10,17 @@ import cppmcache.store;
 
 namespace {
 
-constexpr std::array<std::pair<const char*, const char*>, 5> counters{
+constexpr std::array<std::pair<const char*, const char*>, 9> counters{
     {
      {"hit", "Hits"},
      {"miss", "Misses (compiled then stored)"},
      {"uncacheable", "Compiled without storing"},
      {"bypass", "Run directly"},
      {"failed", "Failed compilations"},
+     {"remote_hit", "Hits served by the remote cache"},
+     {"remote_miss", "Remote cache misses"},
+     {"remote_store", "Results stored remotely"},
+     {"remote_error", "Remote cache errors"},
      }
 };
 
@@ -29,7 +33,8 @@ void usage() {
     std::println("  cppmcache -C | --clear          empties the cache");
     std::println("  cppmcache --version             shows the version");
     std::println("");
-    std::println("Environment: CPPMCACHE_DIR, CPPMCACHE_DISABLE, CPPMCACHE_RECACHE, CPPMCACHE_LOG");
+    std::println("Environment: CPPMCACHE_DIR, CPPMCACHE_DISABLE, CPPMCACHE_RECACHE, CPPMCACHE_LOG,");
+    std::println("             CPPMCACHE_REMOTE, CPPMCACHE_REMOTE_READ_ONLY, CPPMCACHE_REMOTE_TIMEOUT_MS");
 }
 
 void showStats(const cppmcache::Store& store) {

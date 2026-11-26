@@ -39,6 +39,31 @@ cppmcache --print-stats  # counters as name<TAB>value
 | `CPPMCACHE_DISABLE` | run the compiler directly                                      |
 | `CPPMCACHE_RECACHE` | ignore existing entries and replace them                       |
 | `CPPMCACHE_LOG`     | file to which each call appends its outcome and the reason     |
+| `CPPMCACHE_REMOTE`  | URL of a remote cache, for example `http://cache.example:8080` |
+| `CPPMCACHE_REMOTE_READ_ONLY` | fetch from the remote cache but never publish to it   |
+| `CPPMCACHE_REMOTE_TIMEOUT_MS` | time allowed for one remote operation (default: 10000) |
+
+### Sharing a cache between machines
+
+With `CPPMCACHE_REMOTE` set, cppmcache also uses a server of
+[Bazel's HTTP caching protocol](https://bazel.build/remote/caching#http-caching): blobs under
+`/cas/<sha256>`, action results under `/ac/<sha256>`. That is what
+[bazel-remote](https://github.com/buchgr/bazel-remote) serves, and the layout ccache's own HTTP
+storage calls `bazel`.
+
+```sh
+docker run -d -p 8080:8080 buchgr/bazel-remote-cache --max_size=10 --dir=/data
+export CPPMCACHE_REMOTE=http://localhost:8080
+```
+
+- The local cache is always consulted first: a local hit costs no network request.
+- A result missing locally is fetched from the server, checked against its digest, and kept in the
+  local cache. A new result is published after it has been stored locally, unless the cache is
+  read-only.
+- The server never fails a build. If it cannot be reached, cppmcache counts a remote error, leaves
+  it alone for the rest of that compilation, and carries on with the local cache.
+- **There is no TLS and no authentication.** Only `http://` URLs are accepted: use it on a network
+  you trust, or through a tunnel.
 
 ### Building it
 
@@ -60,6 +85,8 @@ cmake --install build --prefix ~/.local
 | MSVC             | `-DCMAKE_CXX_COMPILER=cl`, from a Developer prompt              |
 
 `-DCPPMCACHE_BUILD_TESTS=OFF` leaves the test suite, and its SpecLab download, out of the build.
+`-DCPPMCACHE_REMOTE=OFF` leaves out the remote cache client and the download of
+[stdnet](https://github.com/ambroise-leclerc/stdnet), the networking library it is built on.
 
 ### Importing it with CPM
 
@@ -89,9 +116,11 @@ The key is hybrid and has two levels.
    the inputs. An imported module appears in that tree under its **name** and the **digest of its
    BMI**, never under its path.
 
-Local storage follows the REAPI model: a content-addressable store keyed by SHA-256 and an action
-cache holding canonical protobuf `ActionResult` messages. A remote backend can be added later
-without changing the keys.
+Storage follows the REAPI model: a content-addressable store keyed by SHA-256 and an action cache
+holding canonical protobuf `ActionResult` messages. The remote cache holds the same blobs under the
+same keys as the local one. A manifest, which is not a REAPI notion, is stored remotely as the
+single output of an `ActionResult` filed under the manifest key, so that any server of the protocol
+accepts it.
 
 **Early cutoff.** A consumer depends on the content of the BMIs it imports, not on the sources
 upstream of them. When an interface unit is edited and its BMI does not change, everything
@@ -178,7 +207,9 @@ early cutoff there, because a Clang BMI changes whenever the text of its source 
   not cached either.
 - The BMI of `std` is built by a CMake target that does not use the launcher, so it is rebuilt in
   every fresh build directory.
-- No eviction: the size of the cache is not bounded.
+- No eviction: the size of the local cache is not bounded.
+- The remote cache has no TLS, no authentication and no compression, and it speaks HTTP, not the
+  gRPC interface of the Remote Execution API. Uploads are synchronous: a miss waits for them.
 - A restored dependency file is rewritten, not copied: the same dependencies, laid out differently.
 
 ## Contributing
@@ -189,6 +220,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). The project is written in British Englis
 
 cppmcache is free software, released under the GNU General Public Licence, version 3 or (at your
 option) any later version, like ccache. See [LICENSE](LICENSE).
+
+The remote cache client is built on [stdnet](https://github.com/ambroise-leclerc/stdnet) and,
+through it, on [stdexec](https://github.com/NVIDIA/stdexec); both are under the Apache Licence 2.0
+with LLVM exceptions and are fetched at configure time.
 
 The test suite uses [SpecLab](https://github.com/ambroise-leclerc/SpecLab), fetched at configure
 time by [CPM.cmake](https://github.com/cpm-cmake/CPM.cmake) (MIT, vendored in `cmake/CPM.cmake`).

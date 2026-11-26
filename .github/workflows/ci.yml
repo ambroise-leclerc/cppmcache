@@ -156,7 +156,7 @@ jobs:
 
       - name: Check formatting
         run: |
-          git ls-files 'src/*.cppm' 'src/*.cpp' 'tests/*.cpp' \
+          git ls-files 'src/*.cppm' 'src/*.cpp' 'src/*.hpp' 'tests/*.cpp' \
             | xargs "clang-format-${LLVM_VERSION}" --dry-run -Werror
 
       - name: Configure
@@ -171,6 +171,23 @@ jobs:
         env:
           CPPMCACHE_LLVM_ROOT: /usr/lib/llvm-21
         run: ctest --test-dir build --output-on-failure
+
+      # The same remote cache test, against a real server instead of the test one. The image is
+      # pinned by digest.
+      - name: Test the remote cache against bazel-remote
+        env:
+          BAZEL_REMOTE_IMAGE: buchgr/bazel-remote-cache@sha256:c6e9c3ef67c20bfa558559f314cf4213ec8f890488e5722d42ee26cc743f576f
+        run: |
+          set -euo pipefail
+          docker run -d --rm --name bazel-remote -p 127.0.0.1:19090:8080 "$BAZEL_REMOTE_IMAGE" --max_size=1 --dir=/data
+          for attempt in $(seq 1 30); do
+            curl -sf http://127.0.0.1:19090/status > /dev/null && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:19090/status > /dev/null
+          CPPMCACHE_TEST_REMOTE=http://127.0.0.1:19090 ctest --test-dir build -R 'integration\.remote\.plain' --output-on-failure
+          docker logs bazel-remote 2>&1 | grep -cE ' (GET|PUT|HEAD) ' | xargs echo "requests served by bazel-remote:"
+          docker rm -f bazel-remote
 
       - name: Compare ccache and cppmcache
         env:

@@ -40,6 +40,9 @@ endif()
 
 option(CPPMCACHE_BUILD_TESTS "Build the cppmcache test suite" ${PROJECT_IS_TOP_LEVEL})
 option(CPPMCACHE_INSTALL "Generate the install rules of cppmcache" ${PROJECT_IS_TOP_LEVEL})
+option(CPPMCACHE_REMOTE "Build the remote cache client (fetches stdnet)" ON)
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/CPM.cmake)
 
 # Everything the targets need is set on the targets, so that nothing leaks into an importing project.
 # CXX_EXTENSIONS is deliberately left to the tree: it must match the dialect the `std` module was
@@ -68,8 +71,35 @@ target_sources(cppmcache_core PUBLIC FILE_SET CXX_MODULES BASE_DIRS src FILES
     src/cppmcache/Args.cppm
     src/cppmcache/Driver.cppm
     src/cppmcache/Process.cppm
+    src/cppmcache/Http.cppm
+    src/cppmcache/Remote.cppm
     src/cppmcache/Cache.cppm)
 cppmcache_configure_target(cppmcache_core)
+
+# The transport of the remote cache is built on stdnet (https://github.com/ambroise-leclerc/stdnet),
+# a header-based library. It is confined to one classic translation unit, because the modules use
+# `import std;` and must not also include the standard library. Pinned by commit, not by branch.
+if(CPPMCACHE_REMOTE)
+    CPMAddPackage(
+        NAME stdnet
+        GITHUB_REPOSITORY ambroise-leclerc/stdnet
+        # develop, after v0.2
+        GIT_TAG 9f383d857e60b184a4f8b373f6c8aba99f93674d
+        # Its headers are not held to this project's warning level.
+        SYSTEM YES
+        OPTIONS
+            "STDNET_BUILD_TESTS OFF"
+            "STDNET_BUILD_EXAMPLES OFF"
+    )
+    set(cppmcache_transport src/cppmcache/RemoteTransport.cpp)
+else()
+    set(cppmcache_transport src/cppmcache/RemoteTransportDisabled.cpp)
+endif()
+target_sources(cppmcache_core PRIVATE ${cppmcache_transport})
+set_source_files_properties(${cppmcache_transport} PROPERTIES CXX_SCAN_FOR_MODULES OFF)
+if(CPPMCACHE_REMOTE)
+    target_link_libraries(cppmcache_core PRIVATE stdnet::stdnet)
+endif()
 
 add_executable(cppmcache src/Main.cpp)
 add_executable(cppmcache::cppmcache ALIAS cppmcache)
