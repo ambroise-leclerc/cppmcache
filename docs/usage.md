@@ -28,7 +28,8 @@ It sets `CPPMCACHE_DIR`, `CPPMCACHE_BASEDIR` and `CPPMCACHE_COMPILERCHECK=conten
 steps, and its outputs are `version`, `path` and `cache-directory`.
 
 - Binaries are published for Linux x86_64 (glibc 2.38 or later: Ubuntu 24.04, Debian 13), macOS 15
-  or later on Apple Silicon and Windows x86_64. On another platform, build cppmcache inside your build with CPM, as below.
+  or later on Apple Silicon, and Windows x86_64. On another platform, build cppmcache inside your
+  build with CPM, as below.
 - Every run saves a new copy of the cache and restores the most recent one. cppmcache has no
   eviction yet, so that copy grows until GitHub's own limits remove old ones.
 - Each release carries a `SHA256SUMS` file, which the action checks, and a build provenance
