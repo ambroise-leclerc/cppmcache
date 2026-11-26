@@ -34,6 +34,7 @@ void usage() {
     std::println("  cppmcache --version             shows the version");
     std::println("");
     std::println("Environment: CPPMCACHE_DIR, CPPMCACHE_DISABLE, CPPMCACHE_RECACHE, CPPMCACHE_LOG,");
+    std::println("             CPPMCACHE_BASEDIR, CPPMCACHE_COMPILERCHECK,");
     std::println("             CPPMCACHE_REMOTE, CPPMCACHE_REMOTE_READ_ONLY, CPPMCACHE_REMOTE_TIMEOUT_MS");
 }
 

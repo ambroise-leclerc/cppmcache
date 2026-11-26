@@ -146,6 +146,7 @@ fs::path absoluteNormal(const fs::path& cwd, const fs::path& path) {
     return (path.is_absolute() ? path : cwd / path).lexically_normal();
 }
 
+// Name, in the input tree of an Action, of a file that is not relocatable: its absolute path.
 std::string virtualSource(const fs::path& absolute) {
     return "src/" + absolute.generic_string();
 }
@@ -168,19 +169,21 @@ void writeText(const fs::path& path, std::string_view text) {
 
 // Everything that is common to lookup and storage for a given call.
 struct Context {
-    Store&                 store;
-    const Config&          config;
-    fs::path               cwd;
-    CompilerKind           kind   = CompilerKind::unknown;
-    RemoteCache*           remote = nullptr;  // remote cache, when one is configured and usable
-    Invocation             invocation{};
-    ModuleMap              modules{};
-    fs::path               sourceAbsolute{};
-    Digest                 sourceDigest{};
-    Command                command{};
-    Digest                 commandDigest{};
-    std::vector<NameValue> platform{};
-    std::string            manifestKey{};
+    Store&                   store;
+    const Config&            config;
+    fs::path                 cwd;
+    CompilerKind             kind   = CompilerKind::unknown;
+    RemoteCache*             remote = nullptr;  // remote cache, when one is configured and usable
+    fs::path                 baseDirectory{};   // relocation base, empty when relocation is off
+    std::vector<std::string> compileCommand{};  // the command to run on a miss
+    Invocation               invocation{};
+    ModuleMap                modules{};
+    fs::path                 sourceAbsolute{};
+    Digest                   sourceDigest{};
+    Command                  command{};
+    Digest                   commandDigest{};
+    std::vector<NameValue>   platform{};
+    std::string              manifestKey{};
 
     void log(std::string_view outcome, std::string_view detail = {}) const {
         if (config.log.empty()) {
@@ -190,12 +193,27 @@ struct Context {
         output << std::format("{}\t{}\t{}\n", outcome, invocation.object, detail);
     }
 
+    // Name of an input file in the tree of an Action. A file under the relocation base is named by
+    // its path relative to the working directory, so the tree is the same wherever the project is.
+    std::string treePath(const std::string& path) const {
+        const fs::path absolute = absoluteNormal(cwd, path);
+        if (const auto relative = relocatablePath(absolute.generic_string(), cwd, baseDirectory)) {
+            return "rel/" + *relative;
+        }
+        return virtualSource(absolute);
+    }
+
+    // The form in which a dependency path is recorded in a manifest: relative when it is relocatable.
+    std::string storedPath(const std::string& path) const {
+        return relocatablePath(path, cwd, baseDirectory).value_or(path);
+    }
+
     // Digest of the REAPI Action corresponding to a manifest entry.
     std::pair<Action, Digest> action(const ManifestEntry& entry) const {
         InputTree tree;
-        tree.add(virtualSource(sourceAbsolute), sourceDigest);
+        tree.add(treePath(invocation.source), sourceDigest);
         for (const auto& dependency : entry.dependencies) {
-            tree.add(virtualSource(absoluteNormal(cwd, dependency.path)), dependency.digest);
+            tree.add(treePath(dependency.path), dependency.digest);
         }
         for (const auto& import : entry.imports) {
             tree.add("bmi/" + import.name, import.digest);
@@ -462,14 +480,14 @@ void upload(Context& context, const std::vector<ManifestEntry>& localEntries, co
 }
 
 // Actually compiles, then records the result if all the inputs could be identified.
-int compileAndStore(Context& context, const std::vector<std::string>& original) {
+int compileAndStore(Context& context) {
     Store&            store      = context.store;
     const Invocation& invocation = context.invocation;
 
     // The inputs are read from a report of the compiler: a make-style dependency file for GCC and
     // Clang, a JSON one for MSVC. It is requested here when the command does not ask for it.
     const bool               msvc        = context.kind == CompilerKind::msvc;
-    std::vector<std::string> commandLine = original;
+    std::vector<std::string> commandLine = context.compileCommand;
     fs::path                 depfile     = context.cwd / invocation.depfile;
     const bool               ownDepfile  = msvc || invocation.depfile.empty();
     if (msvc) {
@@ -589,7 +607,7 @@ int compileAndStore(Context& context, const std::vector<std::string>& original) 
         const bool binaryInterface = absolute.extension() == ".gcm" || absolute.extension() == ".bmi" || absolute.extension() == ".pcm"
                                      || absolute.extension() == ".ifc";
         if (binaryInterface) {
-            entry.dependencies.push_back({prerequisite, info->digest});
+            entry.dependencies.push_back({context.storedPath(prerequisite), info->digest});
             continue;
         }
         if (info->timeMacros) {
@@ -598,7 +616,7 @@ int compileAndStore(Context& context, const std::vector<std::string>& original) 
         if (fs::last_write_time(absolute, error) >= started) {
             return uncacheable(std::format("modified during the compilation: {}", prerequisite));
         }
-        entry.dependencies.push_back({prerequisite, info->digest});
+        entry.dependencies.push_back({context.storedPath(prerequisite), info->digest});
     }
     for (const auto& name : deps.imports) {
         if (!std::ranges::contains(importNames, name)) {
@@ -735,12 +753,20 @@ int runCompiler(const Config& config, const std::vector<std::string>& commandLin
     if (context.kind == CompilerKind::unknown) {
         return bypass(std::format("unsupported compiler: {}", original.front()));
     }
-    const bool                     msvc      = context.kind == CompilerKind::msvc;
-    const std::vector<std::string> arguments = expandResponseFiles({original.begin() + 1, original.end()},
-                                                                   context.cwd,
-                                                                   msvc ? ResponseStyle::windows : ResponseStyle::gnu);
-    context.invocation                       = msvc ? parseMsvc(arguments) : parseCommand(context.kind, arguments);
-    const Invocation& invocation             = context.invocation;
+    const bool               msvc      = context.kind == CompilerKind::msvc;
+    std::vector<std::string> arguments = expandResponseFiles({original.begin() + 1, original.end()},
+                                                             context.cwd,
+                                                             msvc ? ResponseStyle::windows : ResponseStyle::gnu);
+    // Relocation: the compiler is then run with the rewritten command, so that its outputs do not
+    // record the absolute location of the project either.
+    context.baseDirectory  = config.baseDirectory;
+    context.compileCommand = original;
+    bool relocated         = false;
+    if (!context.baseDirectory.empty()) {
+        arguments = relocateArguments(context.kind, arguments, context.cwd, context.baseDirectory, relocated);
+    }
+    context.invocation           = msvc ? parseMsvc(arguments) : parseCommand(context.kind, arguments);
+    const Invocation& invocation = context.invocation;
     if (!invocation.bypass.empty()) {
         return bypass(invocation.bypass);
     }
@@ -774,27 +800,78 @@ int runCompiler(const Config& config, const std::vector<std::string>& commandLin
         }
     }
 
-    // Identity of the compiler: real path, size and date of the executable.
+    // The rewritten command replaces the response files of the original one. A Windows command line
+    // is limited to 32 767 characters, so MSVC gets the arguments in a response file of our own.
+    fs::path ownResponseFile;
+    if (relocated) {
+        context.compileCommand.assign(1, original.front());
+        if (msvc) {
+            ownResponseFile = store.temporaryFile(".rsp");
+            // cl requires an option and its separate value (/ifcOutput path) on the same line, so a
+            // line is only broken before an argument that starts an option.
+            std::string content;
+            std::size_t lineLength = 0;
+            for (const auto& argument : arguments) {
+                const std::string quoted       = quoteResponseWindows(argument);
+                const bool        startsOption = !argument.empty() && (argument.front() == '/' || argument.front() == '-');
+                if (lineLength > 0) {
+                    const bool breakLine = startsOption && lineLength + quoted.size() > 1000;
+                    content.push_back(breakLine ? '\n' : ' ');
+                    lineLength = breakLine ? 0 : lineLength + 1;
+                }
+                content    += quoted;
+                lineLength += quoted.size();
+            }
+            content.push_back('\n');
+            writeText(ownResponseFile, content);
+            context.compileCommand.push_back("@" + ownResponseFile.string());
+        } else {
+            std::ranges::copy(arguments, std::back_inserter(context.compileCommand));
+        }
+    }
+    const auto removeOwnResponseFile = [&] {
+        if (!ownResponseFile.empty()) {
+            std::error_code ignored;
+            fs::remove(ownResponseFile, ignored);
+        }
+    };
+
+    // Identity of the compiler: real path, size and date of the executable, or the digest of its
+    // content, which is the same on every machine that has the same compiler.
     std::error_code error;
     const fs::path  compilerReal = fs::canonical(*compiler, error);
     const auto      compilerSize = error ? 0 : fs::file_size(compilerReal, error);
     const auto      compilerTime = error ? 0
                                          : std::chrono::duration_cast<std::chrono::nanoseconds>(fs::last_write_time(compilerReal, error).time_since_epoch()).count();
     if (error) {
+        removeOwnResponseFile();
         return bypass("unreadable compiler");
     }
+    std::string compilerIdentity = std::format("{}|{}|{}", compilerReal.generic_string(), compilerSize, compilerTime);
+    if (config.compilerCheckContent) {
+        const auto compilerInfo = store.fileInfo(compilerReal);
+        if (!compilerInfo) {
+            removeOwnResponseFile();
+            return bypass("unreadable compiler");
+        }
+        compilerIdentity = "content:" + compilerInfo->digest.hash;
+    }
     context.platform = {
-        {"cppmcache.compiler", std::format("{}|{}|{}", compilerReal.generic_string(), compilerSize, compilerTime)},
-        {"cppmcache.cwd", context.cwd.generic_string()},
-        {"cppmcache.format", std::string{formatVersion}},
+        {"cppmcache.compiler",           compilerIdentity},
+        {  "cppmcache.format", std::string{formatVersion}},
     };
+    // The working directory stays out of a relocatable key unless the outputs record it.
+    if (context.baseDirectory.empty() || embedsWorkingDirectory(context.kind, invocation.keyArguments)) {
+        context.platform.emplace_back("cppmcache.cwd", context.cwd.generic_string());
+    }
     std::ranges::sort(extraFiles);
     for (const auto& file : extraFiles) {
         const auto info = store.fileInfo(absoluteNormal(context.cwd, file));
         if (!info) {
+            removeOwnResponseFile();
             return bypass(std::format("unreadable extra_files_to_hash: {}", file));
         }
-        context.platform.emplace_back("cppmcache.extra." + file, info->digest.hash);
+        context.platform.emplace_back("cppmcache.extra." + context.storedPath(absoluteNormal(context.cwd, file).generic_string()), info->digest.hash);
     }
 
     context.command.arguments.push_back(compilerReal.filename().string());
@@ -837,11 +914,13 @@ int runCompiler(const Config& config, const std::vector<std::string>& commandLin
     if (!config.recache) {
         if (const auto exitCode = lookup(context)) {
             reportRemote();
+            removeOwnResponseFile();
             return *exitCode;
         }
     }
-    const int exitCode = compileAndStore(context, original);
+    const int exitCode = compileAndStore(context);
     reportRemote();
+    removeOwnResponseFile();
     return exitCode;
 }
 

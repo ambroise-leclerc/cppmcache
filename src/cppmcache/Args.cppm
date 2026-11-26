@@ -100,6 +100,30 @@ std::vector<std::string> splitResponseWindows(std::string_view text) {
     return arguments;
 }
 
+// Writes one argument so that splitResponseWindows reads it back unchanged.
+std::string quoteResponseWindows(std::string_view argument) {
+    if (!argument.empty() && argument.find_first_of(" \t\r\n\"") == std::string_view::npos) {
+        return std::string{argument};
+    }
+    std::string quoted{'"'};
+    for (std::size_t i = 0; i < argument.size(); ++i) {
+        std::size_t backslashes = 0;
+        while (i < argument.size() && argument[i] == '\\') {
+            ++backslashes;
+            ++i;
+        }
+        if (i == argument.size()) {
+            // Backslashes before the closing quote are doubled, so that the quote stays a quote.
+            quoted.append(backslashes * 2, '\\');
+            break;
+        }
+        quoted.append(argument[i] == '"' ? backslashes * 2 + 1 : backslashes, '\\');
+        quoted.push_back(argument[i]);
+    }
+    quoted.push_back('"');
+    return quoted;
+}
+
 enum class ResponseStyle { gnu, windows };
 
 // Replaces each readable `@file` with its content, recursively. An unreadable file leaves the

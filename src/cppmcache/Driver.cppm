@@ -623,6 +623,112 @@ std::string renderDepfile(std::string_view                                      
     return out;
 }
 
+// Relocation: under a base directory, absolute paths are replaced with paths relative to the working
+// directory, so that the same project checked out elsewhere, or on another machine, produces the
+// same keys. This is ccache's `base_dir`.
+
+// `path` relative to `cwd`, if `path` is absolute and lies under `base`; nothing otherwise.
+std::optional<std::string> relocatablePath(std::string_view path, const fs::path& cwd, const fs::path& base) {
+    if (base.empty() || path.empty()) {
+        return std::nullopt;
+    }
+    // Windows file names are not case-sensitive, and MSVC reports included files in lower case.
+    const auto fold = [](const fs::path& original) {
+#ifdef _WIN32
+        std::string text = original.lexically_normal().generic_string();
+        std::ranges::transform(text, text.begin(), [](char c) {
+            return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+        });
+        return fs::path{text};
+#else
+        return original.lexically_normal();
+#endif
+    };
+    const fs::path candidate{path};
+    if (!candidate.is_absolute()) {
+        return std::nullopt;
+    }
+    const fs::path folded    = fold(candidate);
+    const fs::path underBase = folded.lexically_relative(fold(base));
+    if (underBase.empty() || *underBase.begin() == "..") {
+        return std::nullopt;
+    }
+    const std::string relative = folded.lexically_relative(fold(cwd)).generic_string();
+    return relative.empty() ? std::string{"."} : relative;
+}
+
+// Rewrites the input paths of a command that lie under `base`: source files and the values of the
+// options that name a directory or a file to read. Output paths are left alone, and so are macro
+// definitions: a path inside a -D is part of the program. Sets `changed` if anything was rewritten.
+std::vector<std::string>
+relocateArguments(CompilerKind kind, const std::vector<std::string>& arguments, const fs::path& cwd, const fs::path& base, bool& changed) {
+    static const std::array<std::string_view, 11>
+        gnuOptions{"-I", "-isystem", "-iquote", "-idirafter", "-include", "-imacros", "-isysroot", "-isystem-after", "-iframework", "-F", "-B"};
+    static const std::array<std::string_view, 5> msvcOptions{"I", "FI", "external:I", "Tp", "Tc"};
+    const bool                                   msvc = kind == CompilerKind::msvc;
+
+    changed = false;
+    std::vector<std::string> relocated;
+    relocated.reserve(arguments.size());
+    const auto rewrite = [&](std::string_view path) -> std::optional<std::string> {
+        auto relative = relocatablePath(path, cwd, base);
+        changed       = changed || relative.has_value();
+        return relative;
+    };
+    for (std::size_t i = 0; i < arguments.size(); ++i) {
+        const std::string& argument = arguments[i];
+        const bool         option   = !argument.empty() && (argument.front() == '-' || (msvc && argument.front() == '/'));
+        if (!option) {
+            relocated.push_back(rewrite(argument).value_or(argument));
+            continue;
+        }
+        // The option name without its leading character for MSVC, where `/I` and `-I` are the same.
+        const std::string_view name = msvc ? std::string_view{argument}.substr(1) : std::string_view{argument};
+        std::string_view       matched;
+        for (const auto candidate : msvc ? std::span<const std::string_view>{msvcOptions} : std::span<const std::string_view>{gnuOptions}) {
+            if (name.starts_with(candidate) && candidate.size() > matched.size()) {
+                matched = candidate;
+            }
+        }
+        if (matched.empty()) {
+            relocated.push_back(argument);
+        } else if (name.size() == matched.size()) {
+            // Value in the following argument.
+            relocated.push_back(argument);
+            if (i + 1 < arguments.size()) {
+                ++i;
+                relocated.push_back(rewrite(arguments[i]).value_or(arguments[i]));
+            }
+        } else if (const auto relative = rewrite(name.substr(matched.size()))) {
+            relocated.push_back(argument.substr(0, argument.size() - (name.size() - matched.size())) + *relative);
+        } else {
+            relocated.push_back(argument);
+        }
+    }
+    return relocated;
+}
+
+// Whether the outputs of a command embed the working directory, which then has to stay in the key
+// even when the paths of the command are relocatable: debug information records it.
+bool embedsWorkingDirectory(CompilerKind kind, const std::vector<std::string>& keyArguments) {
+    if (kind == CompilerKind::msvc) {
+        return std::ranges::any_of(keyArguments, [](const std::string& argument) {
+            return argument == "/Z7" || argument == "/FC";
+        });
+    }
+    bool debugInformation = false;
+    bool prefixMap        = false;
+    for (const auto& argument : keyArguments) {
+        if (argument.starts_with("-g") && argument != "-g0" && !argument.starts_with("-gcc-toolchain")) {
+            debugInformation = true;
+        }
+        if (argument.starts_with("-fdebug-prefix-map=") || argument.starts_with("-ffile-prefix-map=")) {
+            prefixMap = true;
+        }
+    }
+    return debugInformation && !prefixMap;
+}
+
 // Reads the report MSVC writes with /sourceDependencies: the headers included, the module
 // provided and the modules imported. Returns nothing if the report cannot be understood.
 std::optional<DepInfo> parseSourceDependencies(std::string_view text) {
