@@ -15,8 +15,9 @@ For a project that imports cppmcache with CPM, FetchContent or add_subdirectory(
   cppmcache_enable(my_library my_executable)
 
 Each target gets cppmcache as its CXX_COMPILER_LAUNCHER and depends on the cppmcache executable, so
-the tool is built before the first cached compilation. To cache a whole build with a cppmcache that
-is already installed, set CMAKE_CXX_COMPILER_LAUNCHER instead.
+the tool is built before the first cached compilation. cppmcache's own targets are not affected:
+they keep whatever launcher the tree sets with CMAKE_CXX_COMPILER_LAUNCHER, which is also the way
+to cache a whole build with a cppmcache that is already installed.
 #]=======================================================================]
 function(cppmcache_enable)
     foreach(target IN LISTS ARGN)

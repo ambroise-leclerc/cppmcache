@@ -49,10 +49,7 @@ function(cppmcache_configure_target target)
         CXX_STANDARD 23
         CXX_STANDARD_REQUIRED ON
         CXX_SCAN_FOR_MODULES ON
-        CXX_MODULE_STD ON
-        # cppmcache is never compiled through a launcher: an importing project's launcher may be
-        # cppmcache itself.
-        CXX_COMPILER_LAUNCHER "")
+        CXX_MODULE_STD ON)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /utf-8)
     else()
