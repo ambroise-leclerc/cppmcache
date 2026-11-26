@@ -78,13 +78,13 @@ jobs:
           ccache --version | head -1
 
       - name: Configure
-        run: cmake --preset ninja-gcc
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
 
       - name: Build
-        run: cmake --build --preset ninja-gcc
+        run: cmake --build build
 
       - name: Test
-        run: ctest --preset ninja-gcc
+        run: ctest --test-dir build --output-on-failure
 
       # Builds this repository with no launcher, with ccache and with cppmcache, and publishes the
       # table. The numbers come from a shared runner: read the hit counts, not small differences.
@@ -92,7 +92,7 @@ jobs:
         run: |
           python3 tools/compare_caches.py \
             --source . --work "${RUNNER_TEMP}/bench" \
-            --cppmcache build-gcc/cppmcache \
+            --cppmcache build/cppmcache \
             --edit src/cppmcache/Hash.cppm \
             --label "cppmcache built with GCC 16.1 ($(ccache --version | head -1))" \
             --cmake-arg=-DCMAKE_CXX_COMPILER=g++ \
@@ -162,13 +162,15 @@ jobs:
       - name: Configure
         env:
           CPPMCACHE_LLVM_ROOT: /usr/lib/llvm-21
-        run: cmake --preset ninja-clang
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release --toolchain cmake/toolchains/linux-clang-libcxx.cmake
 
       - name: Build
-        run: cmake --build --preset ninja-clang
+        run: cmake --build build
 
       - name: Test
-        run: ctest --preset ninja-clang
+        env:
+          CPPMCACHE_LLVM_ROOT: /usr/lib/llvm-21
+        run: ctest --test-dir build --output-on-failure
 
       - name: Compare ccache and cppmcache
         env:
@@ -176,7 +178,7 @@ jobs:
         run: |
           python3 tools/compare_caches.py \
             --source . --work "${RUNNER_TEMP}/bench" \
-            --cppmcache build-clang/cppmcache \
+            --cppmcache build/cppmcache \
             --edit src/cppmcache/Hash.cppm \
             --label "cppmcache built with Clang ${LLVM_VERSION} and libc++ ($(ccache --version | head -1))" \
             "--cmake-arg=--toolchain=${GITHUB_WORKSPACE}/cmake/toolchains/linux-clang-libcxx.cmake" \
@@ -189,4 +191,64 @@ jobs:
         with:
           name: cache-comparison-clang
           path: comparison-clang.*
+          if-no-files-found: ignore
+
+  windows-msvc:
+    name: Windows, MSVC
+    runs-on: windows-2025
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned CMake
+        uses: jwlawson/actions-setup-cmake@0d6a7d60b009d01c9e7523be22153ff8f19460d3 # v2.2.0
+        with:
+          cmake-version: ${{ env.CMAKE_VERSION }}
+
+      - name: Install Ninja and ccache
+        run: choco install ninja ccache --no-progress -y
+
+      # Puts cl.exe and its environment (INCLUDE, LIB, PATH) in place for the following steps.
+      - name: Set up the MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: x64
+
+      - name: Show tool versions
+        shell: bash
+        run: |
+          cl 2>&1 | head -1
+          cmake --version
+          ninja --version
+          ccache --version | head -1
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=cl
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Compare ccache and cppmcache
+        shell: bash
+        run: |
+          python tools/compare_caches.py \
+            --source . --work "${RUNNER_TEMP}/bench" \
+            --cppmcache build/cppmcache.exe \
+            --edit src/cppmcache/Hash.cppm \
+            --label "cppmcache built with MSVC ($(ccache --version | head -1))" \
+            --cmake-arg=-DCMAKE_CXX_COMPILER=cl \
+            --output-json comparison-msvc.json --output-markdown comparison-msvc.md
+          cat comparison-msvc.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload comparison
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cache-comparison-msvc
+          path: comparison-msvc.*
           if-no-files-found: ignore

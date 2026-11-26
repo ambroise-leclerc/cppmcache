@@ -46,12 +46,19 @@ own messages.
 
 ## Building and testing
 
-You need CMake 4.0 to 4.4, Ninja, and GCC 16.1 or Clang 20+ with libc++.
+You need CMake 4.0 to 4.4, Ninja, and GCC 16.1, Clang 20+ with libc++, or MSVC 19.40+. There are
+no CMake presets: name the build directory and the compiler yourself.
 
 ```sh
-cmake --preset ninja-gcc && cmake --build build-gcc && ctest --test-dir build-gcc
-cmake --preset ninja-clang && cmake --build build-clang && ctest --test-dir build-clang
+cmake -S . -B build-gcc -G Ninja -DCMAKE_CXX_COMPILER=g++
+cmake --build build-gcc && ctest --test-dir build-gcc
+
+cmake -S . -B build-clang -G Ninja --toolchain cmake/toolchains/linux-clang-libcxx.cmake
+cmake --build build-clang && ctest --test-dir build-clang
 ```
+
+Few contributors have all three compilers at hand. CI builds and tests with each of them, so say in
+the pull request which ones you ran yourself.
 
 - **Unit tests** are [SpecLab](https://github.com/ambroise-leclerc/SpecLab) scenarios under
   `tests/spec/`, registered with `speclab::Register`. CTest lists one test per scenario.
@@ -59,6 +66,9 @@ cmake --preset ninja-clang && cmake --build build-clang && ctest --test-dir buil
   cppmcache with a real compiler. Each runs in two variants: a minimal command, and the form of
   command CMake writes. The second one exists because GCC changes the content of its dependency
   file when CMake's options are present; a change that passes only the first is not finished.
+- `integration.cpm-consumer` builds a small project that imports cppmcache with CPM. It guards the
+  rule that cppmcache, as a subproject, sets nothing outside its own targets: keep new settings in
+  `cppmcache_configure_target()` or behind `PROJECT_IS_TOP_LEVEL`.
 - A change to how keys are computed should come with numbers. `tools/compare_caches.py` builds a
   project with no launcher, with ccache and with cppmcache:
 

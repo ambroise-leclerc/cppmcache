@@ -51,14 +51,72 @@ std::vector<std::string> splitResponse(std::string_view text) {
     return arguments;
 }
 
+// Splits the content of a response file according to the rules of MSVC, which are those of a
+// Windows command line: separation on whitespace, double quotes group, and a backslash is an
+// ordinary character unless it precedes a double quote (2n backslashes and a quote give n
+// backslashes and toggle quoting; 2n+1 give n backslashes and a literal quote).
+std::vector<std::string> splitResponseWindows(std::string_view text) {
+    // A UTF-8 byte order mark is not part of the first argument.
+    if (text.starts_with("\xEF\xBB\xBF")) {
+        text.remove_prefix(3);
+    }
+    std::vector<std::string> arguments;
+    std::string              current;
+    bool                     inArgument = false;
+    bool                     quoted     = false;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (c == '\\') {
+            std::size_t backslashes = 0;
+            while (i < text.size() && text[i] == '\\') {
+                ++backslashes;
+                ++i;
+            }
+            const bool beforeQuote = i < text.size() && text[i] == '"';
+            current.append(beforeQuote ? backslashes / 2 : backslashes, '\\');
+            inArgument = true;
+            if (beforeQuote && backslashes % 2 == 1) {
+                current.push_back('"');
+            } else {
+                --i;  // the character after the backslashes is handled by the next iteration
+            }
+        } else if (c == '"') {
+            quoted     = !quoted;
+            inArgument = true;
+        } else if (!quoted && (c == ' ' || c == '\t' || c == '\n' || c == '\r')) {
+            if (inArgument) {
+                arguments.push_back(std::move(current));
+                current.clear();
+                inArgument = false;
+            }
+        } else {
+            current.push_back(c);
+            inArgument = true;
+        }
+    }
+    if (inArgument) {
+        arguments.push_back(std::move(current));
+    }
+    return arguments;
+}
+
+enum class ResponseStyle { gnu, windows };
+
 // Replaces each readable `@file` with its content, recursively. An unreadable file leaves the
 // argument as it is, as the compiler does.
-std::vector<std::string> expandResponseFiles(const std::vector<std::string>& arguments, const fs::path& cwd, int depth = 0) {
+std::vector<std::string>
+expandResponseFiles(const std::vector<std::string>& arguments, const fs::path& cwd, ResponseStyle style = ResponseStyle::gnu, int depth = 0) {
     std::vector<std::string> expanded;
     for (const auto& argument : arguments) {
         if (argument.size() > 1 && argument.front() == '@' && depth < 16) {
             if (const auto content = readFile(cwd / argument.substr(1))) {
-                auto nested = expandResponseFiles(splitResponse(*content), cwd, depth + 1);
+                // A UTF-16 file (which MSVC accepts) is left alone: the command is then not cached.
+                if (content->starts_with("\xFF\xFE") || content->starts_with("\xFE\xFF")) {
+                    expanded.push_back(argument);
+                    continue;
+                }
+                auto nested =
+                    expandResponseFiles(style == ResponseStyle::windows ? splitResponseWindows(*content) : splitResponse(*content), cwd, style, depth + 1);
                 std::ranges::move(nested, std::back_inserter(expanded));
                 continue;
             }

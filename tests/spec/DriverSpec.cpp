@@ -58,7 +58,6 @@ const speclab::Register compilerFamilies{"Driver: compiler recognition", "unit,d
                                                            checks.expect(detectCompiler("clang-cl") == CompilerKind::unknown, "clang-cl is not supported");
                                                            checks.expect(detectCompiler("clang-scan-deps-21") == CompilerKind::unknown,
                                                                          "clang-scan-deps is not a compiler");
-                                                           checks.expect(detectCompiler("cl.exe") == CompilerKind::unknown, "MSVC is not supported yet");
                                                            checks.raise();
                                                        })
                                                  .Execute();

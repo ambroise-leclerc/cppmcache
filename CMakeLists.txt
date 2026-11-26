@@ -3,55 +3,92 @@
 
 cmake_minimum_required(VERSION 4.0.0)
 
-# `import std;` remains behind an experimental CMake gate, whose UUID depends on the version.
-if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.3")
-    set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
-else()
-    set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
+# `import std;` is still behind an experimental CMake gate, whose UUID depends on the CMake series
+# and which must be set before the first project() call. A stand-alone build sets it here; a project
+# that imports cppmcache (add_subdirectory, FetchContent, CPM) owns that setting and must have done
+# the same before its own project() call.
+if(NOT DEFINED PROJECT_NAME)
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.3")
+        set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
+    else()
+        set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
+    endif()
+    # Also before project(): CMake builds the `std` module with the dialect in force at that point.
+    set(CMAKE_CXX_EXTENSIONS OFF)
 endif()
-set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
 
 project(cppmcache VERSION 0.1.0
-    DESCRIPTION "C++ compiler cache compatible with modules"
+    DESCRIPTION "C++ compiler cache that understands named modules"
+    HOMEPAGE_URL "https://github.com/ambroise-leclerc/cppmcache"
     LANGUAGES CXX)
 
-if(NOT CMAKE_GENERATOR MATCHES "Ninja")
-    message(FATAL_ERROR "cppmcache uses C++ modules: the Ninja generator is required.")
-endif()
 if(NOT 23 IN_LIST CMAKE_CXX_COMPILER_IMPORT_STD)
-    message(FATAL_ERROR "This compiler does not provide `import std;` for C++23 with CMake ${CMAKE_VERSION}.")
+    message(FATAL_ERROR
+        "cppmcache is written with `import std;`, which this configuration does not provide for C++23 "
+        "(compiler ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}, CMake ${CMAKE_VERSION}, generator "
+        "${CMAKE_GENERATOR}). It needs GCC 16.1+, Clang 20+ with libc++ or MSVC 19.40+, a Ninja generator, and "
+        "CMAKE_EXPERIMENTAL_CXX_IMPORT_STD set before the top-level project() call.")
 endif()
-set(CMAKE_CXX_SCAN_FOR_MODULES ON)
-set(CMAKE_CXX_MODULE_STD ON)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release)
+
+# Settings that belong to whoever owns the build tree are only touched in a stand-alone build.
+if(PROJECT_IS_TOP_LEVEL)
+    if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+        set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+    endif()
+    set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 endif()
+
+option(CPPMCACHE_BUILD_TESTS "Build the cppmcache test suite" ${PROJECT_IS_TOP_LEVEL})
+option(CPPMCACHE_INSTALL "Generate the install rules of cppmcache" ${PROJECT_IS_TOP_LEVEL})
+
+# Everything the targets need is set on the targets, so that nothing leaks into an importing project.
+# CXX_EXTENSIONS is deliberately left to the tree: it must match the dialect the `std` module was
+# built with, and Clang refuses a BMI of `std` compiled as gnu++23 in a c++23 compilation.
+function(cppmcache_configure_target target)
+    set_target_properties(${target} PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_SCAN_FOR_MODULES ON
+        CXX_MODULE_STD ON
+        # cppmcache is never compiled through a launcher: an importing project's launcher may be
+        # cppmcache itself.
+        CXX_COMPILER_LAUNCHER "")
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /utf-8)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra)
+    endif()
+endfunction()
 
 add_library(cppmcache_core STATIC)
 target_sources(cppmcache_core PUBLIC FILE_SET CXX_MODULES BASE_DIRS src FILES
     src/cppmcache/Hash.cppm
     src/cppmcache/Bmi.cppm
     src/cppmcache/Proto.cppm
+    src/cppmcache/Json.cppm
     src/cppmcache/Reapi.cppm
     src/cppmcache/Store.cppm
     src/cppmcache/Args.cppm
     src/cppmcache/Driver.cppm
     src/cppmcache/Process.cppm
     src/cppmcache/Cache.cppm)
-target_compile_definitions(cppmcache_core PUBLIC CPPMCACHE_VERSION="${PROJECT_VERSION}")
-if(MSVC)
-    target_compile_options(cppmcache_core PUBLIC /W4 /utf-8)
-else()
-    target_compile_options(cppmcache_core PUBLIC -Wall -Wextra)
-endif()
+cppmcache_configure_target(cppmcache_core)
 
 add_executable(cppmcache src/Main.cpp)
+add_executable(cppmcache::cppmcache ALIAS cppmcache)
 target_link_libraries(cppmcache PRIVATE cppmcache_core)
+target_compile_definitions(cppmcache PRIVATE CPPMCACHE_VERSION="${PROJECT_VERSION}")
+cppmcache_configure_target(cppmcache)
 
-include(CTest)
-if(BUILD_TESTING)
+# cppmcache_enable(), for projects that import cppmcache.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/CppmcacheLauncher.cmake)
+
+if(CPPMCACHE_INSTALL)
+    include(GNUInstallDirs)
+    install(TARGETS cppmcache RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+if(CPPMCACHE_BUILD_TESTS)
+    enable_testing()
     add_subdirectory(tests)
 endif()

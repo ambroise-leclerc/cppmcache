@@ -7,7 +7,7 @@ A compiler cache for C++ that understands named modules. It is used like ccache,
 compiler, and it also caches module interface units (the object **and** the BMI) and the
 translation units that import modules.
 
-> **Prototype.** GCC 16 and Clang (tested with 21 and 22) are supported on Linux. MSVC and Windows are planned.
+> **Prototype.** GCC 16 and Clang (tested with 21 and 22) are supported on Linux, and MSVC on Windows.
 > Any command the tool does not understand is passed to the compiler unchanged.
 
 ## Why
@@ -24,9 +24,7 @@ intended as the basis of a proposal to ccache.
 ## Usage
 
 ```sh
-cmake --preset ninja-gcc && cmake --build build-gcc && ctest --test-dir build-gcc
-
-# In a CMake project (Ninja generator):
+# In a CMake project (Ninja generator), with a cppmcache that is already built:
 cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER_LAUNCHER=/path/to/cppmcache
 
 cppmcache -s             # statistics
@@ -45,12 +43,39 @@ cppmcache --print-stats  # counters as name<TAB>value
 ### Building it
 
 cppmcache is itself written with C++23 modules and `import std;`, so it needs a recent toolchain:
-CMake 4.0 to 4.4, Ninja, and either GCC 16.1 or Clang 20 or later with libc++.
+CMake 4.0 to 4.4, Ninja, and GCC 16.1, Clang 20 or later with libc++, or MSVC 19.40 or later.
+There are no CMake presets; the build is configured like any other CMake project.
 
-| Preset        | Compiler                                                  |
-|---------------|-----------------------------------------------------------|
-| `ninja-gcc`   | `g++` from the `PATH`                                     |
-| `ninja-clang` | the newest `/usr/lib/llvm-<N>` that ships libc++ modules, or `CPPMCACHE_LLVM_ROOT` |
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build
+cmake --install build --prefix ~/.local
+```
+
+| Compiler         | Add to the configure command                                    |
+|------------------|-----------------------------------------------------------------|
+| GCC              | `-DCMAKE_CXX_COMPILER=g++`                                      |
+| Clang and libc++ | `--toolchain cmake/toolchains/linux-clang-libcxx.cmake`, which picks the newest `/usr/lib/llvm-<N>` that ships libc++ modules, or `CPPMCACHE_LLVM_ROOT` |
+| MSVC             | `-DCMAKE_CXX_COMPILER=cl`, from a Developer prompt              |
+
+`-DCPPMCACHE_BUILD_TESTS=OFF` leaves the test suite, and its SpecLab download, out of the build.
+
+### Importing it with CPM
+
+A project can fetch cppmcache with [CPM.cmake](https://github.com/cpm-cmake/CPM.cmake), build it as
+part of its own tree and compile chosen targets through it:
+
+```cmake
+CPMAddPackage("gh:ambroise-leclerc/cppmcache#<commit>")
+cppmcache_enable(my_library my_executable)
+```
+
+`cppmcache_enable()` makes cppmcache the compiler launcher of each target and makes the target
+depend on the tool, so it is built before the first cached compilation. An imported cppmcache
+builds no tests, installs nothing and leaves the importing project's settings alone. Because it is
+written with `import std;`, the importing project must open CMake's gate for it, by setting
+`CMAKE_EXPERIMENTAL_CXX_IMPORT_STD` before its own `project()` call.
 
 ## How it works
 
@@ -77,8 +102,9 @@ That section is informational, so it is left out of the digest of an imported BM
 identical compilations would never produce the same key.
 
 The inputs of a compilation are discovered after the fact, from the dependency file (`-MD`) and
-from the module mapping (`-fmodule-mapper=` for GCC, `-fmodule-file=name=path` for Clang). There is
-no preprocessor pass.
+from the module mapping (`-fmodule-mapper=` for GCC, `-fmodule-file=name=path` for Clang). For MSVC
+they come from the JSON report of `/sourceDependencies`, which cppmcache adds to the command, and
+from the `/reference name=path` options. There is no preprocessor pass.
 
 ## Measurements
 
@@ -135,6 +161,10 @@ early cutoff there, because a Clang BMI changes whenever the text of its source 
   include path is not detected.
 - Not cached: coverage and profiling builds, `-gsplit-dwarf`, header units, `-MMD`, Clang's
   two-phase `--precompile`, units that use `__DATE__` or `__TIME__`, and linking.
+- With MSVC, `/Zi` is not cached, because it writes debug information to a PDB shared between
+  compilations. That is CMake's default for Debug builds; `/Z7`
+  (`-DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded`) is cached. Precompiled headers and `/MP` are
+  not cached either.
 - The BMI of `std` is built by a CMake target that does not use the launcher, so it is rebuilt in
   every fresh build directory.
 - No eviction: the size of the cache is not bounded.

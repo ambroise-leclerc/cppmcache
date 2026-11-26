@@ -22,7 +22,7 @@ constexpr std::array<std::pair<const char*, const char*>, 5> counters{
 
 void usage() {
     std::println("Usage:");
-    std::println("  cppmcache [key=value…] <compiler> [arguments…]   compiles through the cache");
+    std::println("  cppmcache [key=value...] <compiler> [arguments...]   compiles through the cache");
     std::println("  cppmcache -s | --show-stats     shows the statistics");
     std::println("  cppmcache --print-stats         statistics in 'name<TAB>value' format");
     std::println("  cppmcache -z | --zero-stats     resets the counters to zero");

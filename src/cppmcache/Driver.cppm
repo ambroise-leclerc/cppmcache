@@ -7,20 +7,30 @@
 export module cppmcache.driver;
 
 import std;
+import cppmcache.json;
 import cppmcache.store;
 
 namespace fs = std::filesystem;
 
 export namespace cppmcache {
 
-enum class CompilerKind { unknown, gcc, clang };
+enum class CompilerKind { unknown, gcc, clang, msvc };
 
-// Recognises the compiler family from its name (g++, x86_64-linux-gnu-g++-16, clang++-21…).
+// Recognises the compiler family from its name (g++, x86_64-linux-gnu-g++-16, clang++-21, cl.exe…).
 // clang-cl, which mimics the MSVC command line, is not recognised here.
 CompilerKind detectCompiler(const fs::path& compiler) {
     std::string name = compiler.filename().string();
-    if (name.ends_with(".exe")) {
+    // Windows file names are not case-sensitive: CL.EXE is cl.exe.
+    std::string lower = name;
+    std::ranges::transform(lower, lower.begin(), [](char c) {
+        return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+    });
+    if (lower.ends_with(".exe")) {
+        lower.resize(lower.size() - 4);
         name.resize(name.size() - 4);
+    }
+    if (lower == "cl") {
+        return CompilerKind::msvc;
     }
     while (!name.empty() && (name.back() == '.' || (name.back() >= '0' && name.back() <= '9'))) {
         name.pop_back();
@@ -45,8 +55,8 @@ struct Invocation {
     std::string                        depfile;       // empty: the command does not request a dependency file
     std::string                        depTarget;     // target written in the dependency file
     std::string                        moduleMap;     // GCC: module name → BMI mapping file, empty if absent
-    std::string                        moduleOutput;  // Clang: BMI produced (-fmodule-output=), empty if absent
-    std::map<std::string, std::string> moduleFiles;   // Clang: -fmodule-file=name=path
+    std::string                        moduleOutput;  // Clang, MSVC: BMI produced (-fmodule-output=, /ifcOutput), empty if absent
+    std::map<std::string, std::string> moduleFiles;   // Clang, MSVC: -fmodule-file=name=path, /reference name=path
     std::string                        bypass;        // reason why the command is not cacheable, empty otherwise
     // With -fdeps-format=, GCC no longer writes the `name.c++-module` rules in the dependency file.
     bool makeModuleRules = true;
@@ -288,6 +298,140 @@ Invocation parseCommand(CompilerKind kind, const std::vector<std::string>& argum
     return invocation;
 }
 
+// Parses an MSVC (cl.exe) command. Options start with `/` or `-`; both spellings give the same key.
+Invocation parseMsvc(const std::vector<std::string>& arguments) {
+    // Options whose value is the following argument.
+    static const std::set<std::string_view> separateValue{"I", "D", "U", "FI", "external:I", "imsvc", "wd", "we", "wo"};
+    // Options that add an output, change what is compiled, or look files up implicitly.
+    static const std::set<std::string_view> bypassExact{"E",
+                                                        "EP",
+                                                        "P",
+                                                        "Zi",
+                                                        "ZI",
+                                                        "Zs",
+                                                        "link",
+                                                        "exportHeader",
+                                                        "translateInclude",
+                                                        "scanDependencies",
+                                                        "ifcSearchDir",
+                                                        "showResolvedHeader",
+                                                        "?",
+                                                        "help",
+                                                        "HELP",
+                                                        "ifcOnly"};
+    static const std::array<std::string_view, 17>
+        bypassPrefix{"MP", "Yc", "Yu", "Fp", "FA", "Fa", "FR", "Fr", "Fe", "Fm", "Fi", "doc", "headerUnit", "sourceDependencies", "analyze", "clr", "Fx"};
+
+    Invocation               invocation;
+    bool                     compileOnly = false;
+    std::vector<std::string> sources;
+
+    const auto bypass = [&](std::string reason) {
+        if (invocation.bypass.empty()) {
+            invocation.bypass = std::move(reason);
+        }
+    };
+
+    for (std::size_t i = 0; i < arguments.size(); ++i) {
+        const std::string& argument = arguments[i];
+        if (argument.empty()) {
+            continue;
+        }
+        if (argument.front() == '@') {
+            bypass(std::format("unreadable response file: {}", argument));
+            continue;
+        }
+        if (argument.front() != '/' && argument.front() != '-') {
+            sources.push_back(argument);
+            invocation.keyArguments.push_back(argument);
+            continue;
+        }
+        const std::string_view option = std::string_view{argument}.substr(1);
+        const auto             next   = [&]() -> std::string {
+            if (i + 1 < arguments.size()) {
+                return arguments[++i];
+            }
+            bypass(std::format("option {} without a value", argument));
+            return {};
+        };
+        // Value of an option written "/Fovalue", "/Fo:value" or "/Fo: value".
+        const auto joined = [&](std::string_view name) -> std::string {
+            std::string_view value = option.substr(name.size());
+            if (value.starts_with(':')) {
+                value.remove_prefix(1);
+            }
+            return value.empty() ? next() : std::string{value};
+        };
+
+        if (bypassExact.contains(option) || std::ranges::any_of(bypassPrefix, [&](std::string_view prefix) {
+                return option.starts_with(prefix);
+            })) {
+            bypass(std::format("unsupported option: {}", argument));
+        } else if (option == "c") {
+            compileOnly = true;
+            invocation.keyArguments.emplace_back("/c");
+        } else if (option.starts_with("Fo")) {
+            invocation.object = joined("Fo");
+        } else if (option.starts_with("Fd")) {
+            // The PDB name only matters with /Zi, which is not cached.
+            static_cast<void>(joined("Fd"));
+        } else if (option == "ifcOutput") {
+            if (!invocation.moduleOutput.empty()) {
+                bypass("several /ifcOutput");
+            }
+            invocation.moduleOutput = next();
+            invocation.keyArguments.emplace_back("/ifcOutput=<bmi>");
+        } else if (option == "reference") {
+            // Only the named form is accepted: the key designates a module by its name.
+            const std::string value  = next();
+            const auto        equals = value.find('=');
+            if (equals == std::string::npos || equals == 0 || equals + 1 == value.size()) {
+                bypass("/reference without a module name");
+                continue;
+            }
+            const std::string name       = value.substr(0, equals);
+            invocation.moduleFiles[name] = value.substr(equals + 1);
+            invocation.keyArguments.push_back(std::format("/reference={}=<bmi>", name));
+        } else if (option == "Tp" || option == "Tc") {
+            const std::string source = next();
+            sources.push_back(source);
+            invocation.keyArguments.push_back(std::format("/{}", option));
+            invocation.keyArguments.push_back(source);
+        } else if (separateValue.contains(option)) {
+            invocation.keyArguments.push_back(std::format("/{}", option));
+            invocation.keyArguments.push_back(next());
+        } else {
+            invocation.keyArguments.push_back(std::format("/{}", option));
+        }
+    }
+
+    if (!compileOnly) {
+        bypass("not a compilation (/c missing)");
+    }
+    if (sources.size() != 1) {
+        bypass(std::format("{} source files", sources.size()));
+    } else {
+        invocation.source = sources.front();
+    }
+    if (invocation.bypass.empty()) {
+        // Both separators are valid on Windows; the name is taken apart by hand so that the result
+        // does not depend on the platform cppmcache itself runs on.
+        const auto  separator   = invocation.source.find_last_of("/\\");
+        std::string defaultName = separator == std::string::npos ? invocation.source : invocation.source.substr(separator + 1);
+        if (const auto dot = defaultName.rfind('.'); dot != std::string::npos && dot != 0) {
+            defaultName.resize(dot);
+        }
+        defaultName += ".obj";
+        if (invocation.object.empty()) {
+            invocation.object = defaultName;
+        } else if (invocation.object.ends_with('/') || invocation.object.ends_with('\\')) {
+            // /Fo naming a directory: the object takes the name of the source.
+            invocation.object += defaultName;
+        }
+    }
+    return invocation;
+}
+
 // Module name → BMI path table, read from a GCC mapping file.
 struct ModuleMap {
     std::map<std::string, std::string> files;
@@ -328,9 +472,10 @@ ModuleMap parseGccModuleMap(std::string_view text) {
 
 // Useful content of a make-format dependency file written by GCC.
 struct DepInfo {
-    std::vector<std::string> prerequisites;  // files read to produce the object, in order
-    std::vector<std::string> provides;       // modules provided by the translation unit
-    std::vector<std::string> imports;        // modules imported directly
+    std::vector<std::string> prerequisites;        // files read to produce the object, in order
+    std::vector<std::string> provides;             // modules provided by the translation unit
+    std::vector<std::string> imports;              // modules imported directly
+    bool                     headerUnits = false;  // the unit imports header units
 };
 
 namespace detail {
@@ -476,6 +621,42 @@ std::string renderDepfile(std::string_view                                      
         out += std::format("CXX_IMPORTS += {}{}\n", name, detail::moduleSuffix);
     }
     return out;
+}
+
+// Reads the report MSVC writes with /sourceDependencies: the headers included, the module
+// provided and the modules imported. Returns nothing if the report cannot be understood.
+std::optional<DepInfo> parseSourceDependencies(std::string_view text) {
+    const auto  document = parseJson(text);
+    const auto* data     = document ? document->find("Data") : nullptr;
+    if (data == nullptr || data->kind != JsonValue::Kind::object) {
+        return std::nullopt;
+    }
+    DepInfo info;
+    if (const auto* includes = data->find("Includes"); includes != nullptr) {
+        for (const auto& include : includes->items) {
+            if (include.kind != JsonValue::Kind::string) {
+                return std::nullopt;
+            }
+            detail::appendUnique(info.prerequisites, include.text);
+        }
+    }
+    if (const auto* provided = data->find("ProvidedModule"); provided != nullptr && !provided->text.empty()) {
+        info.provides.push_back(provided->text);
+    }
+    if (const auto* imported = data->find("ImportedModules"); imported != nullptr) {
+        for (const auto& module : imported->items) {
+            // Recent toolsets write objects {"Name", "BMI"}; older ones wrote the names alone.
+            const auto* name = module.kind == JsonValue::Kind::object ? module.find("Name") : &module;
+            if (name == nullptr || name->kind != JsonValue::Kind::string) {
+                return std::nullopt;
+            }
+            detail::appendUnique(info.imports, name->text);
+        }
+    }
+    if (const auto* units = data->find("ImportedHeaderUnits"); units != nullptr) {
+        info.headerUnits = !units->items.empty();
+    }
+    return info;
 }
 
 }  // namespace cppmcache
