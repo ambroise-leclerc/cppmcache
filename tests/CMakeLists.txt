@@ -86,6 +86,17 @@ endif()
 
 # A project that imports cppmcache with CPM and compiles through it with cppmcache_enable(). The
 # nested build uses the generator, compiler and toolchain of this one.
+# A toolchain file given as a relative path is resolved here, as CMake resolved it: the nested
+# build is configured from another directory.
+set(consumer_toolchain "${CMAKE_TOOLCHAIN_FILE}")
+if(consumer_toolchain AND NOT IS_ABSOLUTE "${consumer_toolchain}")
+    foreach(base "${CMAKE_BINARY_DIR}" "${CMAKE_SOURCE_DIR}")
+        if(EXISTS "${base}/${consumer_toolchain}")
+            get_filename_component(consumer_toolchain "${base}/${consumer_toolchain}" ABSOLUTE)
+            break()
+        endif()
+    endforeach()
+endif()
 add_test(NAME integration.cpm-consumer
     COMMAND ${CMAKE_COMMAND}
         -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
@@ -93,6 +104,6 @@ add_test(NAME integration.cpm-consumer
         -DCPPMCACHE=$<TARGET_FILE:cppmcache>
         -DGENERATOR=${CMAKE_GENERATOR}
         -DCOMPILER=${CMAKE_CXX_COMPILER}
-        -DTOOLCHAIN=${CMAKE_TOOLCHAIN_FILE}
+        -DTOOLCHAIN=${consumer_toolchain}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/integration/Consumer.cmake)
 set_tests_properties(integration.cpm-consumer PROPERTIES LABELS "integration;cpm" TIMEOUT 900)
