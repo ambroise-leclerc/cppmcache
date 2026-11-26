@@ -1,0 +1,192 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # CMake is pinned: `import std` sits behind an experimental gate whose value depends on the
+  # CMake series, and SpecLab refuses a series it has not qualified.
+  CMAKE_VERSION: "4.3.6"
+  CMAKE_SHA256: fba967b44c7b40f155f9492dacb5477aab8333699986e1e07a7d90803aba7219
+
+jobs:
+  attribution:
+    name: Attribution rule
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Authors, committers and co-authors must be contactable human accounts, and nothing may
+      # attribute the work to an AI tool (CONTRIBUTING.md, "Authorship and attribution").
+      - name: Check commits and pull request description
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          # A first push has no "before" commit: check the pushed commit alone.
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            BASE_SHA="${HEAD_SHA}~1"
+          fi
+          python3 tools/check_attribution.py "${BASE_SHA}..${HEAD_SHA}"
+
+  linux-gcc:
+    name: Linux, GCC 16.1
+    runs-on: ubuntu-latest
+    # Pinned to 16.1.0, like SpecLab and MduX: GCC 16.2.0 corrupts module BMIs (SpecLab issue 17).
+    container: gcc:16.1.0
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y ninja-build ccache python3 wget git
+
+      - name: Install pinned CMake
+        run: |
+          set -eu
+          archive="${RUNNER_TEMP}/cmake.tar.gz"
+          wget -q -O "$archive" "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz"
+          echo "${CMAKE_SHA256}  ${archive}" | sha256sum -c -
+          tar -xzf "$archive" -C /opt
+          ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/cmake" /usr/local/bin/cmake
+          ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/ctest" /usr/local/bin/ctest
+
+      - name: Show tool versions
+        run: |
+          g++ --version
+          cmake --version
+          ninja --version
+          ccache --version | head -1
+
+      - name: Configure
+        run: cmake --preset ninja-gcc
+
+      - name: Build
+        run: cmake --build --preset ninja-gcc
+
+      - name: Test
+        run: ctest --preset ninja-gcc
+
+      # Builds this repository with no launcher, with ccache and with cppmcache, and publishes the
+      # table. The numbers come from a shared runner: read the hit counts, not small differences.
+      - name: Compare ccache and cppmcache
+        run: |
+          python3 tools/compare_caches.py \
+            --source . --work "${RUNNER_TEMP}/bench" \
+            --cppmcache build-gcc/cppmcache \
+            --edit src/cppmcache/Hash.cppm \
+            --label "cppmcache built with GCC 16.1 ($(ccache --version | head -1))" \
+            --cmake-arg=-DCMAKE_CXX_COMPILER=g++ \
+            --output-json comparison-gcc.json --output-markdown comparison-gcc.md
+          cat comparison-gcc.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload comparison
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cache-comparison-gcc
+          path: comparison-gcc.*
+          if-no-files-found: ignore
+
+  linux-clang:
+    name: Linux, Clang 21 with libc++
+    runs-on: ubuntu-24.04
+    env:
+      LLVM_VERSION: "21"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Clang, libc++ and tools
+        run: |
+          set -euo pipefail
+          # The key is checked against its fingerprint before it is trusted.
+          LLVM_KEY_FPR="6084F3CF814B57C1CF12EFD515CF4D18AF4F7421"
+          sudo install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o /tmp/llvm-snapshot.asc
+          gpg --show-keys --with-colons --fingerprint /tmp/llvm-snapshot.asc \
+            | awk -F: '/^fpr:/ {print $10}' | grep -qx "$LLVM_KEY_FPR"
+          gpg --dearmor < /tmp/llvm-snapshot.asc > /tmp/llvm.gpg
+          sudo install -m 0644 /tmp/llvm.gpg /etc/apt/keyrings/llvm.gpg
+          codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+          echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] https://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-${LLVM_VERSION} main" \
+            | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y ninja-build ccache \
+            "clang-${LLVM_VERSION}" "clang-format-${LLVM_VERSION}" "libc++-${LLVM_VERSION}-dev" "libc++abi-${LLVM_VERSION}-dev"
+
+      - name: Install pinned CMake
+        run: |
+          set -eu
+          archive="${RUNNER_TEMP}/cmake.tar.gz"
+          wget -q -O "$archive" "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz"
+          echo "${CMAKE_SHA256}  ${archive}" | sha256sum -c -
+          sudo tar -xzf "$archive" -C /opt
+          echo "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      # The toolchain file addresses /usr/lib/llvm-<N>/bin directly, so that is what is shown here,
+      # not whatever `clang++` on the PATH happens to be.
+      - name: Show tool versions
+        run: |
+          "/usr/lib/llvm-${LLVM_VERSION}/bin/clang++" --version
+          cmake --version
+          ninja --version
+          ccache --version | head -1
+
+      - name: Check formatting
+        run: |
+          git ls-files 'src/*.cppm' 'src/*.cpp' 'tests/*.cpp' \
+            | xargs "clang-format-${LLVM_VERSION}" --dry-run -Werror
+
+      - name: Configure
+        env:
+          CPPMCACHE_LLVM_ROOT: /usr/lib/llvm-21
+        run: cmake --preset ninja-clang
+
+      - name: Build
+        run: cmake --build --preset ninja-clang
+
+      - name: Test
+        run: ctest --preset ninja-clang
+
+      - name: Compare ccache and cppmcache
+        env:
+          CPPMCACHE_LLVM_ROOT: /usr/lib/llvm-21
+        run: |
+          python3 tools/compare_caches.py \
+            --source . --work "${RUNNER_TEMP}/bench" \
+            --cppmcache build-clang/cppmcache \
+            --edit src/cppmcache/Hash.cppm \
+            --label "cppmcache built with Clang ${LLVM_VERSION} and libc++ ($(ccache --version | head -1))" \
+            "--cmake-arg=--toolchain=${GITHUB_WORKSPACE}/cmake/toolchains/linux-clang-libcxx.cmake" \
+            --output-json comparison-clang.json --output-markdown comparison-clang.md
+          cat comparison-clang.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload comparison
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cache-comparison-clang
+          path: comparison-clang.*
+          if-no-files-found: ignore

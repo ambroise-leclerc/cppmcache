@@ -1,0 +1,4 @@
+# LF line endings everywhere, including on Windows: the CMake scripts of the integration tests
+# write and compare files byte by byte.
+* text=auto eol=lf
+*.cppm linguist-language=C++

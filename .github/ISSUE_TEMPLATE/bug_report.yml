@@ -1,0 +1,49 @@
+name: Bug report
+description: A wrong result, a missed hit, a crash, or a build that fails only through cppmcache
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Please write in English. A wrong hit (a stale object or BMI served from the cache) is the most serious kind of bug here — say so in the title.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Compiler command
+      description: The full command as the build system ran it, including the contents of any `@response` or module-map file.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: cppmcache log
+      description: Set `CPPMCACHE_LOG=/some/file`, reproduce, and paste the lines for the affected files.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: cppmcache version or commit
+      placeholder: "0.1.0, or a commit SHA"
+    validations:
+      required: true
+  - type: input
+    id: compiler
+    attributes:
+      label: Compiler and standard library
+      placeholder: "GCC 16.1.0 / Clang 21.1.8 with libc++"
+    validations:
+      required: true
+  - type: input
+    id: build-system
+    attributes:
+      label: Build system and platform
+      placeholder: "CMake 4.3.6, Ninja 1.13, Ubuntu 26.04"
+    validations:
+      required: true

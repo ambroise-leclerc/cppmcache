@@ -1,11 +1,17 @@
-// Stockage local au modèle REAPI : CAS adressé par contenu, ActionCache, manifestes, compteurs.
-//
-//   <racine>/cas/ab/<sha256>        blobs (objets, BMI, messages Action et Command)
-//   <racine>/ac/ab/<sha256>         ActionResult, indexé par le digest de l'Action
-//   <racine>/manifest/ab/<sha256>   manifestes, indexés par la clé de manifeste
-//   <racine>/stat/ab/<sha256>       digests mémorisés par (chemin, taille, date de modification)
-//   <racine>/stats/<compteur>       un octet ajouté par évènement
-//   <racine>/tmp/                   fichiers temporaires
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ambroise Leclerc
+/**
+ * @file Store.cppm
+ * @brief Local storage on the REAPI model: CAS, ActionCache, manifests, counters.
+ *
+ * Layout under the cache root:
+ * - `cas/ab/<sha256>`: blobs (objects, BMIs, Action and Command messages);
+ * - `ac/ab/<sha256>`: ActionResult, indexed by the digest of the Action;
+ * - `manifest/ab/<sha256>`: manifests, indexed by the manifest key;
+ * - `stat/ab/<sha256>`: digests memoised by (path, size, modification time);
+ * - `stats/<counter>`: one byte appended per event;
+ * - `tmp/`: temporary files.
+ */
 export module cppmcache.store;
 
 import std;
@@ -19,8 +25,8 @@ export namespace cppmcache {
 struct Config {
     fs::path directory;
     fs::path log;
-    bool disable = false;
-    bool recache = false;
+    bool     disable = false;
+    bool     recache = false;
 };
 
 std::optional<std::string> environment(const char* name) {
@@ -58,8 +64,8 @@ std::optional<std::string> readFile(const fs::path& path) {
         return std::nullopt;
     }
     std::error_code error;
-    const auto size = fs::file_size(path, error);
-    std::string content;
+    const auto      size = fs::file_size(path, error);
+    std::string     content;
     if (!error) {
         content.resize(static_cast<std::size_t>(size));
         input.read(content.data(), static_cast<std::streamsize>(content.size()));
@@ -70,22 +76,26 @@ std::optional<std::string> readFile(const fs::path& path) {
     return content;
 }
 
-// Pour un BMI de GCC, `digest` est un digest d'interface : il ignore la section informative qui
-// porte la date de compilation. Deux BMI de même digest sont interchangeables pour un importateur.
+// For a GCC BMI, `digest` is an interface digest: it ignores the informative section that carries
+// the compilation date. Two BMIs with the same digest are interchangeable for an importer.
 struct FileInfo {
     Digest digest;
-    bool timeMacros = false; // le contenu mentionne __DATE__, __TIME__ ou __TIMESTAMP__
+    bool   timeMacros = false;  // the content mentions one of the preprocessor's date and time macros
 };
 
 class Store {
 public:
     explicit Store(fs::path root) : root_(std::move(root)) {}
 
-    const fs::path& root() const { return root_; }
+    const fs::path& root() const {
+        return root_;
+    }
 
     // --- CAS ---------------------------------------------------------------------------------
 
-    fs::path casPath(const Digest& digest) const { return shard("cas", digest.hash); }
+    fs::path casPath(const Digest& digest) const {
+        return shard("cas", digest.hash);
+    }
 
     bool casHas(const Digest& digest) const {
         std::error_code error;
@@ -100,7 +110,7 @@ public:
         return digest;
     }
 
-    // Copie un blob du CAS vers `destination`, en remplaçant le fichier de façon atomique.
+    // Copies a blob from the CAS to `destination`, replacing the file atomically.
     bool casRestore(const Digest& digest, const fs::path& destination) const {
         std::error_code error;
         if (destination.has_parent_path()) {
@@ -111,7 +121,7 @@ public:
             fs::remove(temporary, error);
             return false;
         }
-        // La copie conserve la date du blob : le fichier restauré doit paraître fraîchement produit.
+        // The copy keeps the blob's date: the restored file must look freshly produced.
         fs::last_write_time(temporary, fs::file_time_type::clock::now(), error);
         fs::rename(temporary, destination, error);
         if (error) {
@@ -121,23 +131,31 @@ public:
         return true;
     }
 
-    // --- ActionCache et manifestes -----------------------------------------------------------
+    // --- ActionCache and manifests -----------------------------------------------------------
 
-    std::optional<std::string> actionGet(const Digest& action) const { return readFile(shard("ac", action.hash)); }
-    void actionPut(const Digest& action, std::string_view result) { writeAtomic(shard("ac", action.hash), result); }
+    std::optional<std::string> actionGet(const Digest& action) const {
+        return readFile(shard("ac", action.hash));
+    }
+    void actionPut(const Digest& action, std::string_view result) {
+        writeAtomic(shard("ac", action.hash), result);
+    }
 
-    std::optional<std::string> manifestGet(std::string_view key) const { return readFile(shard("manifest", key)); }
-    void manifestPut(std::string_view key, std::string_view manifest) { writeAtomic(shard("manifest", key), manifest); }
+    std::optional<std::string> manifestGet(std::string_view key) const {
+        return readFile(shard("manifest", key));
+    }
+    void manifestPut(std::string_view key, std::string_view manifest) {
+        writeAtomic(shard("manifest", key), manifest);
+    }
 
-    // --- Digests de fichiers -----------------------------------------------------------------
+    // --- File digests ------------------------------------------------------------------------
 
-    // Digest du contenu d'un fichier. Le résultat est mémorisé par (chemin, taille, date de
-    // modification) dès que le fichier a plus de deux secondes : en deçà, une réécriture pourrait
-    // passer inaperçue faute de résolution suffisante des horodatages.
+    // Digest of a file's content. The result is memoised by (path, size, modification time) once
+    // the file is more than two seconds old: below that, a rewrite could go unnoticed for lack of
+    // sufficient timestamp resolution.
     std::optional<FileInfo> fileInfo(const fs::path& path) {
         std::error_code error;
-        const fs::path absolute = fs::absolute(path, error).lexically_normal();
-        const auto size = fs::file_size(absolute, error);
+        const fs::path  absolute = fs::absolute(path, error).lexically_normal();
+        const auto      size     = fs::file_size(absolute, error);
         if (error) {
             return std::nullopt;
         }
@@ -145,7 +163,8 @@ public:
         if (error) {
             return std::nullopt;
         }
-        const auto stamp = modified.time_since_epoch().count();
+        // Converted to nanoseconds: the clock's native type is a 128-bit integer with libc++.
+        const auto stamp   = std::chrono::duration_cast<std::chrono::nanoseconds>(modified.time_since_epoch()).count();
         const bool settled = fs::file_time_type::clock::now() - modified > std::chrono::seconds{2};
 
         const std::string statKey =
@@ -153,7 +172,10 @@ public:
         const fs::path statPath = shard("stat", statKey);
         if (settled) {
             if (const auto cached = readFile(statPath); cached && cached->size() == 66 && (*cached)[64] == ' ') {
-                return FileInfo{Digest{cached->substr(0, 64), static_cast<std::int64_t>(size)}, (*cached)[65] == '1'};
+                return FileInfo{
+                    Digest{cached->substr(0, 64), static_cast<std::int64_t>(size)},
+                    (*cached)[65] == '1'
+                };
             }
         }
 
@@ -164,26 +186,28 @@ public:
         FileInfo info;
         if (const auto readme = gccReadmeSection(*content)) {
             const std::string_view bytes{*content};
-            info.digest.hash = Sha256{}
-                                   .update("cppmcache-gcc-bmi")
-                                   .update(bytes.substr(0, readme->offset))
-                                   .update(bytes.substr(readme->offset + readme->size))
-                                   .finishHex();
+            info.digest.hash =
+                Sha256{}.update("cppmcache-gcc-bmi").update(bytes.substr(0, readme->offset)).update(bytes.substr(readme->offset + readme->size)).finishHex();
             info.digest.size = static_cast<std::int64_t>(bytes.size());
         } else {
             info.digest = digestOf(*content);
         }
-        info.timeMacros = content->contains("__DATE__") || content->contains("__TIME__") ||
-                          content->contains("__TIMESTAMP__");
+        // The names are split in two so that this file does not itself trigger the detection.
+        info.timeMacros = content->contains("__DA"
+                                            "TE__")
+                          || content->contains("__TI"
+                                               "ME__")
+                          || content->contains("__TIME"
+                                               "STAMP__");
         if (settled && static_cast<std::uintmax_t>(info.digest.size) == size) {
             writeAtomic(statPath, info.digest.hash + (info.timeMacros ? " 1" : " 0"));
         }
         return info;
     }
 
-    // --- Compteurs et journal ----------------------------------------------------------------
+    // --- Counters and log --------------------------------------------------------------------
 
-    // Un compteur est la taille d'un fichier ouvert en ajout : l'incrément n'exige aucun verrou.
+    // A counter is the size of a file opened in append mode: incrementing requires no lock.
     void count(std::string_view counter) {
         std::error_code error;
         fs::create_directories(root_ / "stats", error);
@@ -193,7 +217,7 @@ public:
 
     std::uintmax_t counter(std::string_view name) const {
         std::error_code error;
-        const auto size = fs::file_size(root_ / "stats" / name, error);
+        const auto      size = fs::file_size(root_ / "stats" / name, error);
         return error ? 0 : size;
     }
 
@@ -209,10 +233,10 @@ public:
         }
     }
 
-    // Taille totale et nombre de fichiers du CAS.
+    // Total size and number of files of the CAS.
     std::pair<std::uintmax_t, std::uintmax_t> casUsage() const {
-        std::uintmax_t bytes = 0;
-        std::uintmax_t files = 0;
+        std::uintmax_t  bytes = 0;
+        std::uintmax_t  files = 0;
         std::error_code error;
         for (fs::recursive_directory_iterator it{root_ / "cas", error}, end; !error && it != end; it.increment(error)) {
             if (it->is_regular_file(error)) {
@@ -236,14 +260,14 @@ private:
 
     static std::string uniqueName() {
         static std::atomic<unsigned> sequence{0};
-        std::random_device device;
-        const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count();
+        std::random_device           device;
+        const auto                   ticks = std::chrono::steady_clock::now().time_since_epoch().count();
         return std::format("{:08x}{:016x}{:04x}", device(), static_cast<std::uint64_t>(ticks), sequence++);
     }
 
     static fs::path siblingTemporary(const fs::path& destination) {
         fs::path temporary = destination;
-        temporary += ".tmp." + uniqueName();
+        temporary         += ".tmp." + uniqueName();
         return temporary;
     }
 
@@ -269,4 +293,4 @@ private:
     fs::path root_;
 };
 
-} // namespace cppmcache
+}  // namespace cppmcache

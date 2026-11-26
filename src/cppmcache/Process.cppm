@@ -1,14 +1,19 @@
-// Lancement du compilateur. Seule la variante POSIX existe pour l'instant.
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ambroise Leclerc
+/**
+ * @file Process.cppm
+ * @brief Launching of the compiler (POSIX variant only for now).
+ */
 module;
 
 #ifdef _WIN32
-#error "Le lancement de processus sous Windows reste à écrire (jalon MSVC)."
+    #error "Process launching on Windows remains to be written (MSVC milestone)."
 #else
-#include <errno.h>
-#include <fcntl.h>
-#include <spawn.h>
-#include <sys/wait.h>
-#include <unistd.h>
+    #include <errno.h>
+    #include <fcntl.h>
+    #include <spawn.h>
+    #include <sys/wait.h>
+    #include <unistd.h>
 #endif
 
 export module cppmcache.process;
@@ -29,12 +34,12 @@ std::vector<char*> toArgv(const std::vector<std::string>& arguments) {
     return argv;
 }
 
-} // namespace cppmcache
+}  // namespace cppmcache
 
 export namespace cppmcache {
 
-// Cherche un exécutable comme le ferait le shell : tel quel s'il contient un séparateur, sinon
-// dans les dossiers de PATH.
+// Looks for an executable as the shell would: as is if it contains a separator, otherwise
+// in the directories of PATH.
 std::optional<fs::path> findProgram(const std::string& name) {
     std::error_code error;
     if (name.find('/') != std::string::npos) {
@@ -45,7 +50,11 @@ std::optional<fs::path> findProgram(const std::string& name) {
         return std::nullopt;
     }
     for (const auto directory : std::views::split(std::string_view{path}, ':')) {
-        const fs::path candidate = fs::path{std::string_view{directory.begin(), directory.end()}} / name;
+        const fs::path candidate =
+            fs::path{
+                std::string_view{directory.begin(), directory.end()}
+        }
+            / name;
         if (::access(candidate.c_str(), X_OK) == 0 && fs::is_regular_file(candidate, error)) {
             return candidate;
         }
@@ -53,29 +62,26 @@ std::optional<fs::path> findProgram(const std::string& name) {
     return std::nullopt;
 }
 
-// Remplace le processus courant par la commande. Ne revient qu'en cas d'échec.
+// Replaces the current process with the command. Returns only on failure.
 int execute(const std::vector<std::string>& arguments) {
     auto argv = toArgv(arguments);
     ::execvp(argv.front(), argv.data());
-    std::println(std::cerr, "cppmcache: impossible de lancer {} : {}", arguments.front(),
-                 std::generic_category().message(errno));
+    std::println(std::cerr, "cppmcache: cannot launch {}: {}", arguments.front(), std::generic_category().message(errno));
     return 127;
 }
 
-// Exécute la commande en redirigeant ses sorties vers deux fichiers ; renvoie son code de retour.
-int executeCaptured(const std::vector<std::string>& arguments, const fs::path& standardOutput,
-                    const fs::path& standardError) {
+// Runs the command, redirecting its outputs to two files; returns its exit code.
+int executeCaptured(const std::vector<std::string>& arguments, const fs::path& standardOutput, const fs::path& standardError) {
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_addopen(&actions, 1, standardOutput.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
     posix_spawn_file_actions_addopen(&actions, 2, standardError.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    auto argv = toArgv(arguments);
-    pid_t child = 0;
+    auto      argv    = toArgv(arguments);
+    pid_t     child   = 0;
     const int spawned = ::posix_spawnp(&child, argv.front(), &actions, nullptr, argv.data(), environ);
     posix_spawn_file_actions_destroy(&actions);
     if (spawned != 0) {
-        std::println(std::cerr, "cppmcache: impossible de lancer {} : {}", arguments.front(),
-                     std::generic_category().message(spawned));
+        std::println(std::cerr, "cppmcache: cannot launch {}: {}", arguments.front(), std::generic_category().message(spawned));
         return 127;
     }
     int status = 0;
@@ -90,4 +96,4 @@ int executeCaptured(const std::vector<std::string>& arguments, const fs::path& s
     return WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 127;
 }
 
-} // namespace cppmcache
+}  // namespace cppmcache
