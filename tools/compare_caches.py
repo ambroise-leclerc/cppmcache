@@ -49,15 +49,20 @@ SCENARIOS = [
 ]
 
 
+class BuildFailed(Exception):
+    """A configure or build step returned a non-zero status."""
+
+
 def run(command: list[str], *, env: dict[str, str], cwd: Path | None = None, log: Path) -> None:
-    """Runs a command; on failure, prints the end of its output and stops the script."""
+    """Runs a command; on failure, prints the end of its output and raises BuildFailed."""
     with log.open("ab") as output:
         output.write(f"\n$ {' '.join(command)}\n".encode())
         output.flush()
         status = subprocess.run(command, env=env, cwd=cwd, stdout=output, stderr=subprocess.STDOUT, check=False)
     if status.returncode != 0:
         tail = log.read_text(errors="replace").splitlines()[-40:]
-        sys.exit(f"command failed ({status.returncode}): {' '.join(command)}\n" + "\n".join(tail))
+        print(f"command failed ({status.returncode}): {' '.join(command)}\n" + "\n".join(tail), file=sys.stderr)
+        raise BuildFailed(" ".join(command))
 
 
 def print_stats(tool: str, env: dict[str, str]) -> dict[str, int]:
@@ -138,22 +143,29 @@ def measure(launcher: Launcher, source: Path, work: Path, args: argparse.Namespa
         run(command, env=launcher.env, log=log)
         return {"seconds": round(time.monotonic() - started, 2), "stats": launcher.stats()}
 
-    results: dict[str, dict] = {}
+    # A launcher that breaks the build is a result, not an accident: the scenarios it could not
+    # complete are reported as failed and the comparison goes on.
+    results: dict[str, dict] = {key: {"failed": True} for key, _ in SCENARIOS}
     launcher.reset_cache()
-    configure()
-    results["cold"] = timed_build()
-    configure()
-    results["warm"] = timed_build()
     try:
+        configure()
+        results["cold"] = timed_build()
+        configure()
+        results["warm"] = timed_build()
         edited.write_bytes(original + b"\n// cppmcache benchmark edit\n")
         results["edit"] = timed_build()
+        edited.write_bytes(original)
+        results["revert"] = timed_build()
+    except BuildFailed:
+        pass
     finally:
         edited.write_bytes(original)
-    results["revert"] = timed_build()
     return results
 
 
 def cell(result: dict) -> str:
+    if result.get("failed"):
+        return "build failed"
     text = f"{result['seconds']:.1f} s"
     stats = result["stats"]
     if stats is None:
@@ -182,7 +194,8 @@ def markdown(report: dict) -> str:
     lines += [
         "",
         "Wall-clock time of `cmake --build`, one run per cell, so differences of a few per cent are noise. "
-        "“Not cached” counts compilations the tool passed straight to the compiler.",
+        "“Not cached” counts compilations the tool passed straight to the compiler. "
+        "“Build failed” means the build did not complete with that launcher.",
         "",
     ]
     return "\n".join(lines)
@@ -203,6 +216,8 @@ def main() -> int:
     parser.add_argument("--output-json", type=Path)
     parser.add_argument("--output-markdown", type=Path)
     args = parser.parse_args()
+    # The report contains non-ASCII punctuation; a Windows console defaults to a legacy code page.
+    sys.stdout.reconfigure(encoding="utf-8")
 
     cppmcache = str(Path(args.cppmcache).resolve())
     work = args.work.resolve()
@@ -229,15 +244,21 @@ def main() -> int:
 
     report = {"label": args.label or args.source.resolve().name, "edit": args.edit, "results": {}}
     for launcher in launchers:
-        print(f"measuring {launcher.name}…", file=sys.stderr, flush=True)
+        print(f"measuring {launcher.name}...", file=sys.stderr, flush=True)
         report["results"][launcher.name] = measure(launcher, source, work, args)
 
     text = markdown(report)
     print(text)
     if args.output_markdown:
-        args.output_markdown.write_text(text)
+        args.output_markdown.write_text(text, encoding="utf-8")
     if args.output_json:
         args.output_json.write_text(json.dumps(report, indent=2) + "\n")
+    # The comparison is only meaningful if the reference build and cppmcache itself work.
+    broken = [name for name in ("none", "cppmcache")
+              if any(result.get("failed") for result in report["results"].get(name, {}).values())]
+    if broken:
+        print(f"build failed with: {', '.join(broken)}", file=sys.stderr)
+        return 1
     return 0
 
 

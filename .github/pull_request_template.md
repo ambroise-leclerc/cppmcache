@@ -9,8 +9,9 @@ Closes #
 List the checks you ran and their results. Do not tick anything you did not run: "not run locally,
 CI covers it" is an acceptable answer and a more useful one than a wrong tick.
 
-- [ ] `cmake --preset ninja-gcc && cmake --build build-gcc && ctest --test-dir build-gcc` — <!-- N/N passed -->
-- [ ] `cmake --preset ninja-clang && cmake --build build-clang && ctest --test-dir build-clang` — <!-- N/N passed -->
+- [ ] GCC: configure, build and `ctest` — <!-- N/N passed -->
+- [ ] Clang with libc++: configure, build and `ctest` — <!-- N/N passed -->
+- [ ] MSVC: configure, build and `ctest` — <!-- N/N passed, or "CI only" -->
 - [ ] `clang-format --dry-run -Werror` on the files touched
 - [ ] `tools/check_attribution.py origin/main..HEAD`
 - [ ] Other: <!-- compare_caches.py, a build of another project through the cache -->

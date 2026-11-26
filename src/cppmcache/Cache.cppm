@@ -118,11 +118,11 @@ std::vector<ManifestEntry> decodeManifest(std::string_view encoded) {
 
 namespace cppmcache {
 
-constexpr std::string_view formatVersion      = "2";
+constexpr std::string_view formatVersion      = "3";
 constexpr std::size_t      maxManifestEntries = 32;
 
 // Environment variables that influence the compiler's output.
-constexpr std::array<const char*, 13> hashedEnvironment{"CPATH",
+constexpr std::array<const char*, 15> hashedEnvironment{"CPATH",
                                                         "C_INCLUDE_PATH",
                                                         "CPLUS_INCLUDE_PATH",
                                                         "OBJC_INCLUDE_PATH",
@@ -134,7 +134,9 @@ constexpr std::array<const char*, 13> hashedEnvironment{"CPATH",
                                                         "LC_MESSAGES",
                                                         "LC_CTYPE",
                                                         "GCC_COLORS",
-                                                        "CCC_OVERRIDE_OPTIONS"};
+                                                        "CCC_OVERRIDE_OPTIONS",
+                                                        "INCLUDE",
+                                                        "VSLANG"};
 
 fs::path absoluteNormal(const fs::path& cwd, const fs::path& path) {
     return (path.is_absolute() ? path : cwd / path).lexically_normal();
@@ -329,10 +331,16 @@ int compileAndStore(Context& context, const std::vector<std::string>& original) 
     Store&            store      = context.store;
     const Invocation& invocation = context.invocation;
 
+    // The inputs are read from a report of the compiler: a make-style dependency file for GCC and
+    // Clang, a JSON one for MSVC. It is requested here when the command does not ask for it.
+    const bool               msvc        = context.kind == CompilerKind::msvc;
     std::vector<std::string> commandLine = original;
     fs::path                 depfile     = context.cwd / invocation.depfile;
-    const bool               ownDepfile  = invocation.depfile.empty();
-    if (ownDepfile) {
+    const bool               ownDepfile  = msvc || invocation.depfile.empty();
+    if (msvc) {
+        depfile = store.temporaryFile(".json");
+        commandLine.insert(commandLine.end(), {"/sourceDependencies", depfile.string()});
+    } else if (ownDepfile) {
         depfile = store.temporaryFile(".d");
         commandLine.insert(commandLine.end(), {"-MD", "-MF", depfile.string()});
     }
@@ -392,7 +400,21 @@ int compileAndStore(Context& context, const std::vector<std::string>& original) 
     }
 
     // Classification of the files read by the compiler: headers on one side, imported BMIs on the other.
-    const DepInfo                   deps = parseDepfile(*depText);
+    const auto parsedDeps = msvc ? parseSourceDependencies(*depText) : std::optional{parseDepfile(*depText)};
+    if (!parsedDeps) {
+        return uncacheable("unreadable dependency report");
+    }
+    if (parsedDeps->headerUnits) {
+        return uncacheable("the unit imports header units");
+    }
+    // MSVC names the provided module in its report, but the BMI is the /ifcOutput of the command.
+    DepInfo deps = *parsedDeps;
+    if (msvc) {
+        if (!deps.provides.empty() && invocation.moduleOutput.empty()) {
+            return uncacheable("the unit provides a module but the command has no /ifcOutput");
+        }
+        deps.provides.clear();
+    }
     std::map<fs::path, std::string> moduleOfFile;
     for (const auto& [name, file] : context.modules.files) {
         moduleOfFile[absoluteNormal(context.cwd, file)] = name;
@@ -429,7 +451,8 @@ int compileAndStore(Context& context, const std::vector<std::string>& original) 
         }
         // A BMI absent from the table is an indirect import: GCC finds it through the path recorded
         // in the BMI that imports it. It is therefore tied to its path, like a header.
-        const bool binaryInterface = absolute.extension() == ".gcm" || absolute.extension() == ".bmi" || absolute.extension() == ".pcm";
+        const bool binaryInterface = absolute.extension() == ".gcm" || absolute.extension() == ".bmi" || absolute.extension() == ".pcm"
+                                     || absolute.extension() == ".ifc";
         if (binaryInterface) {
             entry.dependencies.push_back({prerequisite, info->digest});
             continue;
@@ -548,6 +571,7 @@ int runCompiler(const Config& config, const std::vector<std::string>& commandLin
         return 1;
     }
     const std::vector<std::string> original{commandLine.begin() + static_cast<std::ptrdiff_t>(first), commandLine.end()};
+    useBinaryStandardStreams();
     if (config.disable) {
         return execute(original);
     }
@@ -573,11 +597,18 @@ int runCompiler(const Config& config, const std::vector<std::string>& commandLin
     if (context.kind == CompilerKind::unknown) {
         return bypass(std::format("unsupported compiler: {}", original.front()));
     }
-    const std::vector<std::string> arguments = expandResponseFiles({original.begin() + 1, original.end()}, context.cwd);
-    context.invocation                       = parseCommand(context.kind, arguments);
+    const bool                     msvc      = context.kind == CompilerKind::msvc;
+    const std::vector<std::string> arguments = expandResponseFiles({original.begin() + 1, original.end()},
+                                                                   context.cwd,
+                                                                   msvc ? ResponseStyle::windows : ResponseStyle::gnu);
+    context.invocation                       = msvc ? parseMsvc(arguments) : parseCommand(context.kind, arguments);
     const Invocation& invocation             = context.invocation;
     if (!invocation.bypass.empty()) {
         return bypass(invocation.bypass);
+    }
+    // MSVC prepends the content of CL and appends that of _CL_ to every command line.
+    if (msvc && (environment("CL") || environment("_CL_"))) {
+        return bypass("CL or _CL_ is set");
     }
     if (environment("DEPENDENCIES_OUTPUT") || environment("SUNPRO_DEPENDENCIES")) {
         return bypass("DEPENDENCIES_OUTPUT is set");

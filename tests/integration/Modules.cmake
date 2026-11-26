@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Ambroise Leclerc
 
-# Integration test: a module (interface + implementation) and a consumer, compiled through
-# cppmcache by a real compiler. Checks the hits, the misses, the early cutoff and that the outputs
-# are identical.
+# Integration test: a module (interface + implementation) and a consumer, compiled through cppmcache
+# by a real compiler. Checks hits, misses, early cutoff and that the outputs are identical.
 #
-#   cmake -DCPPMCACHE=<exe> -DCOMPILER=<compiler> -DFAMILY=gcc|clang -DVARIANT=plain|cmake
-#         -DWORK_DIR=<folder> -P Modules.cmake
+#   cmake -DCPPMCACHE=<exe> -DCOMPILER=<compiler> -DFAMILY=gcc|clang|msvc -DVARIANT=plain|cmake
+#         -DWORK_DIR=<directory> -P Modules.cmake
 #
-# The "cmake" variant reproduces the form of the commands that CMake writes for scanned units:
-# -fmodules-ts and -fdeps-format options for GCC, module options in a response file for Clang.
+# The "cmake" variant reproduces the form of the commands CMake writes for scanned units:
+# -fmodules-ts and -fdeps-format options for GCC, module options in a response file for Clang and
+# MSVC, plus /showIncludes for MSVC.
 
 foreach(required CPPMCACHE COMPILER FAMILY VARIANT WORK_DIR)
     if(NOT DEFINED ${required})
@@ -17,6 +17,8 @@ foreach(required CPPMCACHE COMPILER FAMILY VARIANT WORK_DIR)
     endif()
 endforeach()
 
+set(OBJ o)
+set(EXE "")
 if(FAMILY STREQUAL "gcc")
     set(BMI_EXTENSION gcm)
     set(BASE_FLAGS -std=c++23 -fmodules -O1)
@@ -26,6 +28,14 @@ if(FAMILY STREQUAL "gcc")
 elseif(FAMILY STREQUAL "clang")
     set(BMI_EXTENSION pcm)
     set(BASE_FLAGS -std=c++23 -O1)
+elseif(FAMILY STREQUAL "msvc")
+    set(BMI_EXTENSION ifc)
+    set(OBJ obj)
+    set(EXE .exe)
+    set(BASE_FLAGS /nologo /std:c++latest /EHsc /O1)
+    if(VARIANT STREQUAL "cmake")
+        list(APPEND BASE_FLAGS /showIncludes)
+    endif()
 else()
     message(FATAL_ERROR "unknown compiler family: ${FAMILY}")
 endif()
@@ -44,29 +54,58 @@ function(read_counter name result)
     set(${result} "${CMAKE_MATCH_2}" PARENT_SCOPE)
 endfunction()
 
-# Module options to compile `source` to `object`, the BMI of `api` being in `bmi_dir`.
-function(module_flags source object bmi_dir result)
+# Arguments, after the compiler, that compile `source` to `object`, the BMI of `api` being in
+# `bmi_dir`.
+function(compile_arguments source object bmi_dir result)
     file(MAKE_DIRECTORY "${WORK_DIR}/${bmi_dir}")
     get_filename_component(object_dir "${object}" DIRECTORY)
     file(MAKE_DIRECTORY "${WORK_DIR}/${object_dir}")
     set(bmi "${bmi_dir}/api.${BMI_EXTENSION}")
+    set(is_interface FALSE)
+    if(source STREQUAL "api.cppm")
+        set(is_interface TRUE)
+    endif()
+
+    # Module options, one per line as CMake writes them in a module map.
     if(FAMILY STREQUAL "gcc")
         file(WRITE "${WORK_DIR}/${object}.modmap" "$root .\napi ${bmi}\n")
-        set(flags "-fmodule-mapper=${object}.modmap" -x c++)
-    else()
-        if(source STREQUAL "api.cppm")
-            set(flags -x c++-module "-fmodule-output=${bmi}")
+        set(module_lines "-fmodule-mapper=${object}.modmap")
+    elseif(FAMILY STREQUAL "clang")
+        if(is_interface)
+            set(module_lines "-x c++-module" "-fmodule-output=${bmi}")
         else()
-            set(flags "-fmodule-file=api=${bmi}")
+            set(module_lines "-fmodule-file=api=${bmi}")
         endif()
-        if(VARIANT STREQUAL "cmake")
-            string(REPLACE ";" "\n" lines "${flags}")
-            string(REPLACE "-x\nc++-module" "-x c++-module" lines "${lines}")
-            file(WRITE "${WORK_DIR}/${object}.modmap" "${lines}\n")
-            set(flags "@${object}.modmap")
+    else()
+        if(is_interface)
+            set(module_lines "-interface" "-ifcOutput ${bmi}")
+        else()
+            set(module_lines "-reference api=${bmi}")
         endif()
     endif()
-    set(${result} "${flags}" PARENT_SCOPE)
+    if(VARIANT STREQUAL "cmake" AND NOT FAMILY STREQUAL "gcc")
+        string(REPLACE ";" "\n" content "${module_lines}")
+        file(WRITE "${WORK_DIR}/${object}.modmap" "${content}\n")
+        set(module_flags "@${object}.modmap")
+    else()
+        # On a command line, "-x c++-module" is two arguments.
+        string(REPLACE " " ";" module_flags "${module_lines}")
+    endif()
+
+    if(FAMILY STREQUAL "msvc")
+        set(language "")
+        if(is_interface)
+            set(language /TP)
+        endif()
+        set(arguments ${BASE_FLAGS} ${module_flags} "/Fo${object}" /c ${language} "${source}")
+    else()
+        set(language "")
+        if(FAMILY STREQUAL "gcc")
+            set(language -x c++)
+        endif()
+        set(arguments ${BASE_FLAGS} -MD -MT "${object}" -MF "${object}.d" ${module_flags} ${language} -o "${object}" -c "${source}")
+    endif()
+    set(${result} "${arguments}" PARENT_SCOPE)
 endfunction()
 
 # Compiles `source` to `object` through the cache and requires that only the `expected` counter
@@ -76,12 +115,11 @@ function(compile source object expected)
     if(NOT arg_BMI_DIR)
         set(arg_BMI_DIR out)
     endif()
-    module_flags("${source}" "${object}" "${arg_BMI_DIR}" flags)
+    compile_arguments("${source}" "${object}" "${arg_BMI_DIR}" arguments)
     read_counter(hit hits_before)
     read_counter(miss misses_before)
     execute_process(
-        COMMAND ${ENVIRONMENT} "${CPPMCACHE}" "${COMPILER}" ${BASE_FLAGS} -MD -MT "${object}" -MF "${object}.d"
-            ${flags} -o "${object}" -c "${source}"
+        COMMAND ${ENVIRONMENT} "${CPPMCACHE}" "${COMPILER}" ${arguments}
         WORKING_DIRECTORY "${WORK_DIR}"
         RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE output)
     if(NOT status EQUAL 0)
@@ -92,31 +130,46 @@ function(compile source object expected)
     math(EXPR hits "${hits_after} - ${hits_before}")
     math(EXPR misses "${misses_after} - ${misses_before}")
     if(expected STREQUAL "hit" AND (NOT hits EQUAL 1 OR NOT misses EQUAL 0))
-        message(FATAL_ERROR "${source}: hit expected, got ${hits} hit(s) and ${misses} miss(es)")
+        message(FATAL_ERROR "${source}: hit expected, got ${hits} hit(s) and ${misses} miss(es)\n${output}")
     elseif(expected STREQUAL "miss" AND (NOT hits EQUAL 0 OR NOT misses EQUAL 1))
-        message(FATAL_ERROR "${source}: miss expected, got ${hits} hit(s) and ${misses} miss(es)")
+        message(FATAL_ERROR "${source}: miss expected, got ${hits} hit(s) and ${misses} miss(es)\n${output}")
     endif()
-    foreach(produced "${object}" "${object}.d")
-        if(NOT EXISTS "${WORK_DIR}/${produced}")
-            message(FATAL_ERROR "${produced} was not produced (${expected})")
+    set(produced "${object}")
+    if(NOT FAMILY STREQUAL "msvc")
+        list(APPEND produced "${object}.d")
+    endif()
+    foreach(file IN LISTS produced)
+        if(NOT EXISTS "${WORK_DIR}/${file}")
+            message(FATAL_ERROR "${file} was not produced (${expected})")
         endif()
     endforeach()
+    # MSVC reports the headers it reads on its standard output, where the build system reads them:
+    # a hit must replay them.
+    if(FAMILY STREQUAL "msvc" AND VARIANT STREQUAL "cmake" AND source STREQUAL "main.cpp" AND NOT output MATCHES "cstdio")
+        message(FATAL_ERROR "the /showIncludes output of ${source} was not relayed (${expected}):\n${output}")
+    endif()
 endfunction()
 
 function(compile_all api implementation consumer)
-    compile(api.cppm out/api.o ${api})
-    compile(api_impl.cpp out/api_impl.o ${implementation})
-    compile(main.cpp out/main.o ${consumer})
+    compile(api.cppm out/api.${OBJ} ${api})
+    compile(api_impl.cpp out/api_impl.${OBJ} ${implementation})
+    compile(main.cpp out/main.${OBJ} ${consumer})
 endfunction()
 
 # Links, runs the program and compares its output.
 function(expect_output expected)
-    execute_process(COMMAND "${COMPILER}" -o out/probe out/api.o out/api_impl.o out/main.o
-        WORKING_DIRECTORY "${WORK_DIR}" RESULT_VARIABLE status ERROR_VARIABLE errors)
+    set(objects out/api.${OBJ} out/api_impl.${OBJ} out/main.${OBJ})
+    if(FAMILY STREQUAL "msvc")
+        set(link /nologo /Feout/probe.exe ${objects})
+    else()
+        set(link -o out/probe ${objects})
+    endif()
+    execute_process(COMMAND "${COMPILER}" ${link}
+        WORKING_DIRECTORY "${WORK_DIR}" RESULT_VARIABLE status OUTPUT_VARIABLE errors ERROR_VARIABLE errors)
     if(NOT status EQUAL 0)
         message(FATAL_ERROR "linking failed:\n${errors}")
     endif()
-    execute_process(COMMAND "${WORK_DIR}/out/probe" OUTPUT_VARIABLE output OUTPUT_STRIP_TRAILING_WHITESPACE
+    execute_process(COMMAND "${WORK_DIR}/out/probe${EXE}" OUTPUT_VARIABLE output OUTPUT_STRIP_TRAILING_WHITESPACE
         RESULT_VARIABLE status)
     if(NOT status EQUAL 0 OR NOT output STREQUAL expected)
         message(FATAL_ERROR "output '${output}', expected '${expected}'")
@@ -141,7 +194,7 @@ set(bmi "api.${BMI_EXTENSION}")
 message(STATUS "1. empty cache: three misses")
 compile_all(miss miss miss)
 expect_output("4 42")
-set(outputs api.o ${bmi} api_impl.o main.o)
+set(outputs api.${OBJ} ${bmi} api_impl.${OBJ} main.${OBJ})
 foreach(output IN LISTS outputs)
     file(SHA256 "${WORK_DIR}/out/${output}" reference_${output})
 endforeach()
@@ -156,16 +209,18 @@ foreach(output IN LISTS outputs)
     endif()
 endforeach()
 expect_output("4 42")
-file(READ "${WORK_DIR}/out/main.o.d" depfile)
-if(NOT depfile MATCHES "out/main\\.o:" OR NOT depfile MATCHES "main\\.cpp")
-    message(FATAL_ERROR "restored dependency file incomplete:\n${depfile}")
-endif()
-# GCC lists the BMIs it read; its make-format module rules disappear with -fdeps-format.
-if(FAMILY STREQUAL "gcc" AND NOT depfile MATCHES "out/api\\.gcm")
-    message(FATAL_ERROR "BMI missing from the restored dependency file:\n${depfile}")
-endif()
-if(FAMILY STREQUAL "gcc" AND VARIANT STREQUAL "plain" AND NOT depfile MATCHES "CXX_IMPORTS \\+= api")
-    message(FATAL_ERROR "module rules missing from the restored dependency file:\n${depfile}")
+if(NOT FAMILY STREQUAL "msvc")
+    file(READ "${WORK_DIR}/out/main.${OBJ}.d" depfile)
+    if(NOT depfile MATCHES "out/main\\.o:" OR NOT depfile MATCHES "main\\.cpp")
+        message(FATAL_ERROR "restored dependency file incomplete:\n${depfile}")
+    endif()
+    # GCC lists the BMIs it reads; its make-format module rules disappear with -fdeps-format.
+    if(FAMILY STREQUAL "gcc" AND NOT depfile MATCHES "out/api\\.gcm")
+        message(FATAL_ERROR "BMI missing from the restored dependency file:\n${depfile}")
+    endif()
+    if(FAMILY STREQUAL "gcc" AND VARIANT STREQUAL "plain" AND NOT depfile MATCHES "CXX_IMPORTS \\+= api")
+        message(FATAL_ERROR "module rules missing from the restored dependency file:\n${depfile}")
+    endif()
 endif()
 
 message(STATUS "3. implementation modified: the BMI does not change, the consumer stays cached")
@@ -183,41 +238,52 @@ write_api("int a;")
 compile_all(hit hit hit)
 expect_output("4 63")
 
-message(STATUS "6. different output folder: the key does not depend on the output paths")
-compile(api.cppm elsewhere/api.o hit BMI_DIR elsewhere/bmi)
-compile(main.cpp elsewhere/main.o hit BMI_DIR elsewhere/bmi)
+message(STATUS "6. another output directory: the key does not depend on the output paths")
+compile(api.cppm elsewhere/api.${OBJ} hit BMI_DIR elsewhere/bmi)
+compile(main.cpp elsewhere/main.${OBJ} hit BMI_DIR elsewhere/bmi)
 file(SHA256 "${WORK_DIR}/elsewhere/bmi/${bmi}" relocated)
 if(NOT relocated STREQUAL reference_${bmi})
     message(FATAL_ERROR "the BMI restored elsewhere differs from the original")
 endif()
 
-message(STATUS "7. BMI regenerated later without the cache: the consumers stay cached")
+message(STATUS "7. BMI regenerated later without the cache: consumers stay cached")
 execute_process(COMMAND ${CMAKE_COMMAND} -E sleep 1.2)
-module_flags(api.cppm out/api.o out flags)
+compile_arguments(api.cppm out/api.${OBJ} out arguments)
 execute_process(
-    COMMAND "${COMPILER}" ${BASE_FLAGS} -MD -MF out/api.direct.d ${flags} -o out/api.o -c api.cppm
-    WORKING_DIRECTORY "${WORK_DIR}" RESULT_VARIABLE status ERROR_VARIABLE errors)
+    COMMAND "${COMPILER}" ${arguments}
+    WORKING_DIRECTORY "${WORK_DIR}" RESULT_VARIABLE status OUTPUT_VARIABLE errors ERROR_VARIABLE errors)
 if(NOT status EQUAL 0)
     message(FATAL_ERROR "direct compilation failed:\n${errors}")
 endif()
-# GCC records the compilation date in the BMI: without an interface digest, this case would be a miss.
+# GCC writes the build time into the BMI: without an interface digest, this case would be a miss.
 file(SHA256 "${WORK_DIR}/out/${bmi}" regenerated)
 if(FAMILY STREQUAL "gcc" AND regenerated STREQUAL reference_${bmi})
     message(FATAL_ERROR "the regenerated BMI is identical to the original: the test no longer proves anything")
 endif()
-compile(main.cpp out/main.o hit)
-compile(api_impl.cpp out/api_impl.o hit)
+if(regenerated STREQUAL reference_${bmi})
+    message(STATUS "   (this compiler regenerates an identical BMI)")
+else()
+    message(STATUS "   (this compiler regenerates a different BMI)")
+endif()
+compile(main.cpp out/main.${OBJ} hit)
+compile(api_impl.cpp out/api_impl.${OBJ} hit)
 expect_output("4 63")
 
 message(STATUS "8. a compilation error is neither cached nor hidden")
 file(WRITE "${WORK_DIR}/broken.cpp" "int main() { return undefined_symbol; }\n")
+if(FAMILY STREQUAL "msvc")
+    set(arguments /nologo /std:c++latest /Foout/broken.obj /c broken.cpp)
+else()
+    set(arguments -std=c++23 -o out/broken.o -c broken.cpp)
+endif()
 foreach(attempt 1 2)
+    # MSVC writes its diagnostics on the standard output.
     execute_process(
-        COMMAND ${ENVIRONMENT} "${CPPMCACHE}" "${COMPILER}" -std=c++23 -o out/broken.o -c broken.cpp
-        WORKING_DIRECTORY "${WORK_DIR}" RESULT_VARIABLE status ERROR_VARIABLE errors OUTPUT_QUIET)
+        COMMAND ${ENVIRONMENT} "${CPPMCACHE}" "${COMPILER}" ${arguments}
+        WORKING_DIRECTORY "${WORK_DIR}" RESULT_VARIABLE status OUTPUT_VARIABLE errors ERROR_VARIABLE errors)
     if(status EQUAL 0 OR NOT errors MATCHES "undefined_symbol")
         message(FATAL_ERROR "the compilation error was not relayed (code ${status}):\n${errors}")
     endif()
 endforeach()
 
-message(STATUS "${FAMILY} (${VARIANT}) integration test passed")
+message(STATUS "${FAMILY} integration test (${VARIANT}) passed")

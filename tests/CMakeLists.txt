@@ -21,8 +21,10 @@ add_executable(cppmcache_spec
     spec/HashSpec.cpp
     spec/ProtoSpec.cpp
     spec/DriverSpec.cpp
+    spec/MsvcSpec.cpp
     spec/StoreSpec.cpp)
 target_link_libraries(cppmcache_spec PRIVATE cppmcache_core speclab::speclab)
+cppmcache_configure_target(cppmcache_spec)
 
 # One CTest test per scenario: discovery queries the executable when ctest starts, with the
 # script that SpecLab uses for its own tests.
@@ -72,6 +74,8 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     if(other)
         cppmcache_integration_test(clang "${other}")
     endif()
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    cppmcache_integration_test(msvc "${CMAKE_CXX_COMPILER}")
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     cppmcache_integration_test(clang "${CMAKE_CXX_COMPILER}")
     cppmcache_find_other_compiler(gcc 15 other g++ g++-16 g++-15)
@@ -79,3 +83,27 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         cppmcache_integration_test(gcc "${other}")
     endif()
 endif()
+
+# A project that imports cppmcache with CPM and compiles through it with cppmcache_enable(). The
+# nested build uses the generator, compiler and toolchain of this one.
+# A toolchain file given as a relative path is resolved here, as CMake resolved it: the nested
+# build is configured from another directory.
+set(consumer_toolchain "${CMAKE_TOOLCHAIN_FILE}")
+if(consumer_toolchain AND NOT IS_ABSOLUTE "${consumer_toolchain}")
+    foreach(base "${CMAKE_BINARY_DIR}" "${CMAKE_SOURCE_DIR}")
+        if(EXISTS "${base}/${consumer_toolchain}")
+            get_filename_component(consumer_toolchain "${base}/${consumer_toolchain}" ABSOLUTE)
+            break()
+        endif()
+    endforeach()
+endif()
+add_test(NAME integration.cpm-consumer
+    COMMAND ${CMAKE_COMMAND}
+        -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
+        -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/integration-cpm-consumer
+        -DCPPMCACHE=$<TARGET_FILE:cppmcache>
+        -DGENERATOR=${CMAKE_GENERATOR}
+        -DCOMPILER=${CMAKE_CXX_COMPILER}
+        -DTOOLCHAIN=${consumer_toolchain}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/integration/Consumer.cmake)
+set_tests_properties(integration.cpm-consumer PROPERTIES LABELS "integration;cpm" TIMEOUT 900)
