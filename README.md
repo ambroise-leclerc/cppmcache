@@ -7,7 +7,8 @@ A compiler cache for C++ that understands named modules. It is used like ccache,
 compiler, and it also caches module interface units (the object **and** the BMI) and the
 translation units that import modules.
 
-> **Prototype.** GCC 16 and Clang (tested with 21 and 22) are supported on Linux, and MSVC on Windows.
+> **Prototype.** GCC 16 and Clang (tested with 21 and 22) are supported on Linux, Clang on macOS and
+> MSVC on Windows.
 > Any command the tool does not understand is passed to the compiler unchanged.
 
 ## Why
@@ -35,7 +36,7 @@ cppmcache --print-stats  # counters as name<TAB>value
 
 | Variable            | Effect                                                         |
 |---------------------|----------------------------------------------------------------|
-| `CPPMCACHE_DIR`     | cache directory (default: `~/.cache/cppmcache`)                |
+| `CPPMCACHE_DIR`     | cache directory (default: `~/.cache/cppmcache`; `~/Library/Caches/cppmcache` on macOS; `%LOCALAPPDATA%\cppmcache` on Windows) |
 | `CPPMCACHE_DISABLE` | run the compiler directly                                      |
 | `CPPMCACHE_RECACHE` | ignore existing entries and replace them                       |
 | `CPPMCACHE_LOG`     | file to which each call appends its outcome and the reason     |
@@ -83,6 +84,7 @@ cmake --install build --prefix ~/.local
 | GCC              | `-DCMAKE_CXX_COMPILER=g++`                                      |
 | Clang and libc++ | `--toolchain cmake/toolchains/linux-clang-libcxx.cmake`, which picks the newest `/usr/lib/llvm-<N>` that ships libc++ modules, or `CPPMCACHE_LLVM_ROOT` |
 | MSVC             | `-DCMAKE_CXX_COMPILER=cl`, from a Developer prompt              |
+| Clang on macOS   | `--toolchain cmake/toolchains/macos-llvm.cmake`, which uses Homebrew's `llvm@21` or `CPPMCACHE_LLVM_ROOT`. Apple's Clang cannot build cppmcache: it has no `std` module. |
 
 `-DCPPMCACHE_BUILD_TESTS=OFF` leaves the test suite, and its SpecLab download, out of the build.
 `-DCPPMCACHE_REMOTE=OFF` leaves out the remote cache client and the download of

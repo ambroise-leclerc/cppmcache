@@ -124,7 +124,7 @@ constexpr std::string_view formatVersion      = "3";
 constexpr std::size_t      maxManifestEntries = 32;
 
 // Environment variables that influence the compiler's output.
-constexpr std::array<const char*, 15> hashedEnvironment{"CPATH",
+constexpr std::array<const char*, 17> hashedEnvironment{"CPATH",
                                                         "C_INCLUDE_PATH",
                                                         "CPLUS_INCLUDE_PATH",
                                                         "OBJC_INCLUDE_PATH",
@@ -138,7 +138,9 @@ constexpr std::array<const char*, 15> hashedEnvironment{"CPATH",
                                                         "GCC_COLORS",
                                                         "CCC_OVERRIDE_OPTIONS",
                                                         "INCLUDE",
-                                                        "VSLANG"};
+                                                        "VSLANG",
+                                                        "SDKROOT",
+                                                        "MACOSX_DEPLOYMENT_TARGET"};
 
 fs::path absoluteNormal(const fs::path& cwd, const fs::path& path) {
     return (path.is_absolute() ? path : cwd / path).lexically_normal();

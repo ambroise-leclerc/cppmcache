@@ -50,7 +50,11 @@ Config loadConfig() {
     } else if (const auto local = environment("LOCALAPPDATA")) {
         config.directory = fs::path{*local} / "cppmcache";
     } else if (const auto home = environment("HOME")) {
+#ifdef __APPLE__
+        config.directory = fs::path{*home} / "Library" / "Caches" / "cppmcache";
+#else
         config.directory = fs::path{*home} / ".cache" / "cppmcache";
+#endif
     } else {
         config.directory = fs::temp_directory_path() / "cppmcache";
     }

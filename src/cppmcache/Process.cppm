@@ -19,6 +19,9 @@ module;
     #include <spawn.h>
     #include <sys/wait.h>
     #include <unistd.h>
+    #ifdef __APPLE__
+        #include <crt_externs.h>
+    #endif
 #endif
 
 export module cppmcache.process;
@@ -216,9 +219,15 @@ int executeCaptured(const std::vector<std::string>& arguments, const fs::path& s
     posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_addopen(&actions, 1, standardOutput.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
     posix_spawn_file_actions_addopen(&actions, 2, standardError.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    auto      argv    = toArgv(arguments);
-    pid_t     child   = 0;
-    const int spawned = ::posix_spawnp(&child, argv.front(), &actions, nullptr, argv.data(), environ);
+    auto  argv  = toArgv(arguments);
+    pid_t child = 0;
+    #ifdef __APPLE__
+    // macOS does not declare `environ` for programs: the accessor is the supported way to reach it.
+    char** const environment = *_NSGetEnviron();
+    #else
+    char** const environment = environ;
+    #endif
+    const int spawned = ::posix_spawnp(&child, argv.front(), &actions, nullptr, argv.data(), environment);
     posix_spawn_file_actions_destroy(&actions);
     if (spawned != 0) {
         std::println(std::cerr, "cppmcache: cannot launch {}: {}", arguments.front(), std::generic_category().message(spawned));
