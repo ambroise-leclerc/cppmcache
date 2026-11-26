@@ -60,7 +60,13 @@ jobs:
             echo "::error::the binary still depends on the GCC runtime libraries"
             exit 1
           fi
-          echo "glibc required: $(objdump -T build/cppmcache | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+          required="$(objdump -T build/cppmcache | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+          echo "glibc required: ${required}"
+          # The documentation promises glibc 2.38: a newer requirement must be noticed.
+          if [ "$(printf '%s\nGLIBC_2.38\n' "$required" | sort -V | tail -1)" != "GLIBC_2.38" ]; then
+            echo "::error::the binary now requires ${required}; the documented minimum is glibc 2.38"
+            exit 1
+          fi
 
       - name: Package and test
         run: python3 tools/package_release.py --binary build/cppmcache --platform linux-x86_64 --compiler g++ --family gcc
@@ -80,7 +86,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04]
+        # The binary needs glibc 2.38, which ubuntu-22.04 does not have.
+        os: [ubuntu-24.04, ubuntu-latest]
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -103,11 +110,9 @@ jobs:
           CPPMCACHE_DIR="${RUNNER_TEMP}/cache" "$binary" -s
           echo "BINARY=$binary" >> "$GITHUB_ENV"
 
-      # Only the newer image has a Clang that knows the module options the test uses.
       - name: Compile a modules project through it
-        if: matrix.os == 'ubuntu-24.04'
         run: |
-          cmake -DCPPMCACHE="$BINARY" -DCOMPILER="$(command -v clang++-18)" -DFAMILY=clang -DVARIANT=cmake \
+          cmake -DCPPMCACHE="$BINARY" -DCOMPILER="$(command -v clang++-18 || command -v clang++)" -DFAMILY=clang -DVARIANT=cmake \
             -DWORK_DIR="${RUNNER_TEMP}/smoke" -P tests/integration/Modules.cmake
 
   macos:
@@ -130,19 +135,18 @@ jobs:
           brew install llvm@21 ninja
           echo "CPPMCACHE_LLVM_ROOT=$(brew --prefix llvm@21)" >> "$GITHUB_ENV"
 
-      # libc++ is linked statically: the machine that runs the binary need not have Homebrew's LLVM.
+      # Homebrew's Clang links against the libc++ of the system unless told otherwise, so the binary
+      # needs nothing from Homebrew at run time. Linking LLVM's libc++ statically is not an option:
+      # the static libc++abi aborts at start-up next to the system's allocator.
       - name: Build
         run: |
           set -euo pipefail
-          libraries="${CPPMCACHE_LLVM_ROOT}/lib/c++"
-          ls "$libraries"/libc++.a "$libraries"/libc++abi.a
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release --toolchain cmake/toolchains/macos-llvm.cmake \
-            -DCPPMCACHE_BUILD_TESTS=OFF -DCMAKE_EXE_LINKER_FLAGS=-nostdlib++ \
-            "-DCMAKE_CXX_STANDARD_LIBRARIES=${libraries}/libc++.a ${libraries}/libc++abi.a"
+            -DCPPMCACHE_BUILD_TESTS=OFF
           cmake --build build
           otool -L build/cppmcache
-          if otool -L build/cppmcache | grep -Ei 'homebrew|/opt/|libc\+\+'; then
-            echo "::error::the binary still depends on a C++ runtime library"
+          if otool -L build/cppmcache | tail -n +2 | grep -Ev '^\s*(/usr/lib/|/System/)'; then
+            echo "::error::the binary depends on a library that is not part of macOS"
             exit 1
           fi
 
