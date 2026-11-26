@@ -146,6 +146,17 @@ the table in the job summary. On the same 24-core machine, with ccache 4.12.3:
 | Trailing comment added to `Hash.cppm`       |   14.4 s | 11.3 s (5 hits, 6 not cached)    | 12.7 s (11 misses) |
 | Edit reverted                               |   14.0 s | 10.3 s (5 hits, 6 not cached)    | 0.3 s (11 hits)    |
 
+| MSVC 19.52, GitHub runner, ccache 4.14.3    | No cache | ccache                 | cppmcache          |
+|---------------------------------------------|---------:|------------------------|--------------------|
+| Clean build, empty cache                    |   55.3 s | 56.7 s (34 misses)     | 58.3 s (34 misses) |
+| Clean build, populated cache                |   55.1 s | 1.7 s (34 hits)        | 4.2 s (34 hits)    |
+| Trailing comment added to `Hash.cppm`       |   24.8 s | build failed           | 23.3 s (4 hits, 8 misses) |
+| Edit reverted                               |   24.8 s | build failed           | 0.6 s (12 hits)    |
+
+The MSVC table comes from CI, on a shared four-core runner, so its times are not comparable with
+the two tables above. With MSVC, ccache does cache module units, and the build then fails as soon
+as an interface is edited: units served from the cache no longer match the modules they import.
+
 Each cell is a single run. Two things are worth reading in the Clang table. ccache's five hits in
 the third row are for units that were re-run because a BMI they import had changed: its key does
 not include imported BMIs, so those objects come from the previous build. And cppmcache gets no
@@ -156,7 +167,7 @@ early cutoff there, because a Clang BMI changes whenever the text of its source 
 - Absolute paths and the working directory are part of the key: nothing is shared between two
   checkouts of the same project.
 - Early cutoff depends on the compiler producing an identical BMI. With GCC, shifting the lines of
-  an interface changes its BMI; with Clang, any edit to the interface source does.
+  an interface changes its BMI; with Clang and MSVC, any edit to the interface source does.
 - As with ccache's direct mode, a newly created header that shadows another one later in the
   include path is not detected.
 - Not cached: coverage and profiling builds, `-gsplit-dwarf`, header units, `-MMD`, Clang's
