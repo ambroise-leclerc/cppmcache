@@ -210,6 +210,63 @@ jobs:
           path: comparison-clang.*
           if-no-files-found: ignore
 
+  macos-clang:
+    name: macOS, Clang 21 with libc++
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned CMake
+        uses: jwlawson/actions-setup-cmake@0d6a7d60b009d01c9e7523be22153ff8f19460d3 # v2.2.0
+        with:
+          cmake-version: ${{ env.CMAKE_VERSION }}
+
+      # Apple's Clang has no `std` module: the build needs an upstream LLVM.
+      - name: Install upstream LLVM, Ninja and ccache
+        run: |
+          set -euo pipefail
+          brew install llvm@21 ninja ccache
+          echo "CPPMCACHE_LLVM_ROOT=$(brew --prefix llvm@21)" >> "$GITHUB_ENV"
+
+      - name: Show tool versions
+        run: |
+          uname -m
+          "$CPPMCACHE_LLVM_ROOT/bin/clang++" --version
+          cmake --version
+          ninja --version
+          ccache --version | head -1
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release --toolchain cmake/toolchains/macos-llvm.cmake
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Compare ccache and cppmcache
+        run: |
+          python3 tools/compare_caches.py \
+            --source . --work "${RUNNER_TEMP}/bench" \
+            --cppmcache build/cppmcache \
+            --edit src/cppmcache/Hash.cppm \
+            --label "cppmcache built on macOS with Clang 21 and libc++ ($(ccache --version | head -1))" \
+            "--cmake-arg=--toolchain=${GITHUB_WORKSPACE}/cmake/toolchains/macos-llvm.cmake" \
+            --output-json comparison-macos.json --output-markdown comparison-macos.md
+          cat comparison-macos.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload comparison
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cache-comparison-macos
+          path: comparison-macos.*
+          if-no-files-found: ignore
+
   windows-msvc:
     name: Windows, MSVC
     runs-on: windows-2025

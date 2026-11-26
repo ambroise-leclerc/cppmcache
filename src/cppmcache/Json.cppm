@@ -150,8 +150,13 @@ private:
         while (position_ < input_.size() && std::string_view{"+-0123456789.eE"}.contains(input_[position_])) {
             ++position_;
         }
-        const std::string_view digits = input_.substr(start, position_ - start);
-        if (digits.empty() || std::from_chars(digits.data(), digits.data() + digits.size(), value.number).ec != std::errc{}) {
+        // strtod and not from_chars: libc++ marks the floating-point from_chars unavailable for the
+        // macOS versions this is built for. The program never changes the C locale, so the decimal
+        // separator is the dot JSON uses.
+        const std::string digits{input_.substr(start, position_ - start)};
+        char*             end = nullptr;
+        value.number          = std::strtod(digits.c_str(), &end);
+        if (digits.empty() || end != digits.c_str() + digits.size()) {
             return std::nullopt;
         }
         value.kind = JsonValue::Kind::number;
