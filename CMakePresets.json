@@ -1,0 +1,32 @@
+{
+    "version": 3,
+    "configurePresets": [
+        {
+            "name": "ninja-gcc",
+            "displayName": "Ninja, GCC, Release",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build-gcc",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_CXX_COMPILER": "g++"
+            }
+        },
+        {
+            "name": "ninja-gcc-debug",
+            "displayName": "Ninja, GCC, Debug",
+            "inherits": "ninja-gcc",
+            "binaryDir": "${sourceDir}/build-gcc-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        }
+    ],
+    "buildPresets": [
+        { "name": "ninja-gcc", "configurePreset": "ninja-gcc" },
+        { "name": "ninja-gcc-debug", "configurePreset": "ninja-gcc-debug" }
+    ],
+    "testPresets": [
+        { "name": "ninja-gcc", "configurePreset": "ninja-gcc", "output": { "outputOnFailure": true } },
+        { "name": "ninja-gcc-debug", "configurePreset": "ninja-gcc-debug", "output": { "outputOnFailure": true } }
+    ]
+}
