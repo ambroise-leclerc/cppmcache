@@ -7,7 +7,8 @@
 # The including script defines FAMILY (gcc, clang or msvc), VARIANT (plain or cmake), COMPILER,
 # CPPMCACHE and WORK_DIR, and sets ENVIRONMENT to the `cmake -E env …` prefix of every cppmcache
 # call. ENVIRONMENT is read when a function runs, so a script can switch cache directory between
-# two steps.
+# two steps. SOURCE_PREFIX, empty by default, is put in front of every source file name: a script
+# sets it to an absolute directory to compile with absolute paths.
 
 set(OBJ o)
 set(EXE "")
@@ -84,13 +85,13 @@ function(compile_arguments source object bmi_dir result)
         if(is_interface)
             set(language /TP)
         endif()
-        set(arguments ${BASE_FLAGS} ${module_flags} "/Fo${object}" /c ${language} "${source}")
+        set(arguments ${BASE_FLAGS} ${module_flags} "/Fo${object}" /c ${language} "${SOURCE_PREFIX}${source}")
     else()
         set(language "")
         if(FAMILY STREQUAL "gcc")
             set(language -x c++)
         endif()
-        set(arguments ${BASE_FLAGS} -MD -MT "${object}" -MF "${object}.d" ${module_flags} ${language} -o "${object}" -c "${source}")
+        set(arguments ${BASE_FLAGS} -MD -MT "${object}" -MF "${object}.d" ${module_flags} ${language} -o "${object}" -c "${SOURCE_PREFIX}${source}")
     endif()
     set(${result} "${arguments}" PARENT_SCOPE)
 endfunction()

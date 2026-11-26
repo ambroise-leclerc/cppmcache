@@ -39,9 +39,34 @@ cppmcache --print-stats  # counters as name<TAB>value
 | `CPPMCACHE_DISABLE` | run the compiler directly                                      |
 | `CPPMCACHE_RECACHE` | ignore existing entries and replace them                       |
 | `CPPMCACHE_LOG`     | file to which each call appends its outcome and the reason     |
+| `CPPMCACHE_BASEDIR` | absolute directory under which paths are made relative, so that the cache is shared between locations |
+| `CPPMCACHE_COMPILERCHECK` | `content` identifies the compiler by the digest of its executable instead of its path, size and date |
 | `CPPMCACHE_REMOTE`  | URL of a remote cache, for example `http://cache.example:8080` |
 | `CPPMCACHE_REMOTE_READ_ONLY` | fetch from the remote cache but never publish to it   |
 | `CPPMCACHE_REMOTE_TIMEOUT_MS` | time allowed for one remote operation (default: 10000) |
+
+### Sharing a cache between locations
+
+By default the working directory and every absolute path of a command are part of its key, so two
+checkouts of a project share nothing. Set `CPPMCACHE_BASEDIR` to the root of the checkout, as with
+ccache's `base_dir`:
+
+```sh
+export CPPMCACHE_BASEDIR=$PWD        # the directory that holds both the sources and the build tree
+```
+
+- Absolute paths under that directory — source files and the values of options such as `-I` — are
+  rewritten relative to the working directory, in the key **and in the command the compiler is run
+  with**, so its outputs do not record the location either. Diagnostics then show relative paths.
+- Paths outside it, such as system headers, stay absolute: they must be the same wherever the cache
+  is shared. Paths inside macro definitions are never rewritten.
+- The working directory leaves the key, unless the command produces debug information without a
+  `-fdebug-prefix-map`, because the object then records it.
+- Two machines also need the same compiler identity. The default one includes the date of the
+  executable; `CPPMCACHE_COMPILERCHECK=content` uses its content instead.
+
+Measured on this repository, built by CMake from one directory and then from another with the same
+cache: 37 misses, then 37 hits.
 
 ### Sharing a cache between machines
 
@@ -126,9 +151,10 @@ accepts it.
 upstream of them. When an interface unit is edited and its BMI does not change, everything
 downstream is served from the cache.
 
-**Interface digest.** GCC writes the build time into the `.gnu.c++.README` section of every BMI.
-That section is informational, so it is left out of the digest of an imported BMI; otherwise two
-identical compilations would never produce the same key.
+**Interface digest.** GCC writes the build time and the working directory into the
+`.gnu.c++.README` section of every BMI. That section is informational, so the digest of an imported
+BMI covers the name and content of every other section and nothing else; otherwise two identical
+compilations, or the same one in two places, would never produce the same key.
 
 The inputs of a compilation are discovered after the fact, from the dependency file (`-MD`) and
 from the module mapping (`-fmodule-mapper=` for GCC, `-fmodule-file=name=path` for Clang). For MSVC
@@ -193,8 +219,11 @@ early cutoff there, because a Clang BMI changes whenever the text of its source 
 
 ## Known limitations
 
-- Absolute paths and the working directory are part of the key: nothing is shared between two
-  checkouts of the same project.
+- Without `CPPMCACHE_BASEDIR`, absolute paths and the working directory are part of the key:
+  nothing is shared between two checkouts of the same project.
+- With Clang and MSVC, a module is shared across locations only when its BMI comes from the cache.
+  One that is recompiled elsewhere outside the launcher is a different file, and its importers miss.
+  With GCC this does not matter: the interface digest ignores what a BMI says about its location.
 - Early cutoff depends on the compiler producing an identical BMI. With GCC, shifting the lines of
   an interface changes its BMI; with Clang and MSVC, any edit to the interface source does.
 - As with ccache's direct mode, a newly created header that shadows another one later in the

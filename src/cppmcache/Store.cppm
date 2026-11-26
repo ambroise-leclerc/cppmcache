@@ -27,6 +27,10 @@ struct Config {
     fs::path log;
     bool     disable = false;
     bool     recache = false;
+    // Relocation: absolute paths under this directory are made relative. Empty: no relocation.
+    fs::path baseDirectory;
+    // The compiler is identified by the digest of its executable instead of its path, size and date.
+    bool compilerCheckContent = false;
     // Remote cache: an http:// URL, empty when there is none.
     std::string remoteUrl;
     bool        remoteReadOnly      = false;
@@ -59,6 +63,13 @@ Config loadConfig() {
     }
     config.disable = environment("CPPMCACHE_DISABLE").has_value();
     config.recache = environment("CPPMCACHE_RECACHE").has_value();
+    if (const auto base = environment("CPPMCACHE_BASEDIR")) {
+        // Only an absolute path can be a base: a relative one would depend on the working directory.
+        if (const fs::path path{*base}; path.is_absolute()) {
+            config.baseDirectory = path.lexically_normal();
+        }
+    }
+    config.compilerCheckContent = environment("CPPMCACHE_COMPILERCHECK").value_or("") == "content";
     if (const auto remote = environment("CPPMCACHE_REMOTE")) {
         config.remoteUrl = *remote;
     }
@@ -182,14 +193,19 @@ public:
         const bool settled = fs::file_time_type::clock::now() - modified > std::chrono::seconds{2};
 
         const std::string statKey =
-            KeyHasher{}.field("2").field(absolute.generic_string()).field(std::to_string(size)).field(std::to_string(stamp)).finishHex();
+            KeyHasher{}.field("3").field(absolute.generic_string()).field(std::to_string(size)).field(std::to_string(stamp)).finishHex();
         const fs::path statPath = shard("stat", statKey);
         if (settled) {
-            if (const auto cached = readFile(statPath); cached && cached->size() == 66 && (*cached)[64] == ' ') {
-                return FileInfo{
-                    Digest{cached->substr(0, 64), static_cast<std::int64_t>(size)},
-                    (*cached)[65] == '1'
-                };
+            // Record: 64 hexadecimal digits, a space, the time-macro flag, a space, the digest's size.
+            if (const auto cached = readFile(statPath); cached && cached->size() > 67 && (*cached)[64] == ' ' && (*cached)[66] == ' ') {
+                std::int64_t           digestSize = 0;
+                const std::string_view digits     = std::string_view{*cached}.substr(67);
+                if (std::from_chars(digits.data(), digits.data() + digits.size(), digestSize).ec == std::errc{}) {
+                    return FileInfo{
+                        Digest{cached->substr(0, 64), digestSize},
+                        (*cached)[65] == '1'
+                    };
+                }
             }
         }
 
@@ -198,11 +214,8 @@ public:
             return std::nullopt;
         }
         FileInfo info;
-        if (const auto readme = gccReadmeSection(*content)) {
-            const std::string_view bytes{*content};
-            info.digest.hash =
-                Sha256{}.update("cppmcache-gcc-bmi").update(bytes.substr(0, readme->offset)).update(bytes.substr(readme->offset + readme->size)).finishHex();
-            info.digest.size = static_cast<std::int64_t>(bytes.size());
+        if (const auto interface = gccInterfaceDigest(*content)) {
+            info.digest = *interface;
         } else {
             info.digest = digestOf(*content);
         }
@@ -213,8 +226,9 @@ public:
                                                "ME__")
                           || content->contains("__TIME"
                                                "STAMP__");
-        if (settled && static_cast<std::uintmax_t>(info.digest.size) == size) {
-            writeAtomic(statPath, info.digest.hash + (info.timeMacros ? " 1" : " 0"));
+        // Not memoised if the file changed size while it was being read.
+        if (settled && content->size() == size) {
+            writeAtomic(statPath, std::format("{} {} {}", info.digest.hash, info.timeMacros ? '1' : '0', info.digest.size));
         }
         return info;
     }

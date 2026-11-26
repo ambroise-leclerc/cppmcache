@@ -22,6 +22,7 @@ add_executable(cppmcache_spec
     spec/DriverSpec.cpp
     spec/MsvcSpec.cpp
     spec/HttpSpec.cpp
+    spec/RelocationSpec.cpp
     spec/StoreSpec.cpp)
 target_link_libraries(cppmcache_spec PRIVATE cppmcache_core speclab::speclab)
 cppmcache_configure_target(cppmcache_spec)
@@ -86,6 +87,20 @@ endif()
 
 # A project that imports cppmcache with CPM and compiles through it with cppmcache_enable(). The
 # nested build uses the generator, compiler and toolchain of this one.
+# Relocation: the same project compiled from two locations shares its cache entries.
+string(TOLOWER "${CMAKE_CXX_COMPILER_ID}" relocation_family)
+if(relocation_family STREQUAL "gnu")
+    set(relocation_family gcc)
+endif()
+add_test(NAME integration.relocation
+    COMMAND ${CMAKE_COMMAND}
+        -DCPPMCACHE=$<TARGET_FILE:cppmcache>
+        -DCOMPILER=${CMAKE_CXX_COMPILER}
+        -DFAMILY=${relocation_family}
+        -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/integration-relocation
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/integration/Relocate.cmake)
+set_tests_properties(integration.relocation PROPERTIES LABELS "integration;relocation")
+
 # A toolchain file given as a relative path is resolved here, as CMake resolved it: the nested
 # build is configured from another directory.
 set(consumer_toolchain "${CMAKE_TOOLCHAIN_FILE}")
