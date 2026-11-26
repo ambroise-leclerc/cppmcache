@@ -219,16 +219,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install pinned CMake and Ninja
-        uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb # v4.4.2
+      - name: Install pinned CMake
+        uses: jwlawson/actions-setup-cmake@0d6a7d60b009d01c9e7523be22153ff8f19460d3 # v2.2.0
         with:
-          cmakeVersion: ${{ env.CMAKE_VERSION }}
+          cmake-version: ${{ env.CMAKE_VERSION }}
 
       # Apple's Clang has no `std` module: the build needs an upstream LLVM.
-      - name: Install upstream LLVM and ccache
+      - name: Install upstream LLVM, Ninja and ccache
         run: |
           set -euo pipefail
-          brew install llvm@21 ccache
+          brew install llvm@21 ninja ccache
           echo "CPPMCACHE_LLVM_ROOT=$(brew --prefix llvm@21)" >> "$GITHUB_ENV"
 
       - name: Show tool versions
