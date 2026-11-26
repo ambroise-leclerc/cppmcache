@@ -805,10 +805,22 @@ int runCompiler(const Config& config, const std::vector<std::string>& commandLin
         context.compileCommand.assign(1, original.front());
         if (msvc) {
             ownResponseFile = store.temporaryFile(".rsp");
+            // cl requires an option and its separate value (/ifcOutput path) on the same line, so a
+            // line is only broken before an argument that starts an option.
             std::string content;
+            std::size_t lineLength = 0;
             for (const auto& argument : arguments) {
-                content += quoteResponseWindows(argument) + "\n";
+                const std::string quoted       = quoteResponseWindows(argument);
+                const bool        startsOption = !argument.empty() && (argument.front() == '/' || argument.front() == '-');
+                if (lineLength > 0) {
+                    const bool breakLine = startsOption && lineLength + quoted.size() > 1000;
+                    content.push_back(breakLine ? '\n' : ' ');
+                    lineLength = breakLine ? 0 : lineLength + 1;
+                }
+                content    += quoted;
+                lineLength += quoted.size();
             }
+            content.push_back('\n');
             writeText(ownResponseFile, content);
             context.compileCommand.push_back("@" + ownResponseFile.string());
         } else {
