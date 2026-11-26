@@ -1,0 +1,244 @@
+name: Release
+
+# Builds the binaries of a release, tests each package, and publishes them when a version tag is
+# pushed. On a pull request that touches the packaging, and on a manual run, everything but the
+# publication runs: a dry run.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - action.yml
+      - CMakeLists.txt
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_VERSION: "4.3.6"
+  CMAKE_SHA256: fba967b44c7b40f155f9492dacb5477aab8333699986e1e07a7d90803aba7219
+
+jobs:
+  linux:
+    name: Package, Linux x86_64
+    runs-on: ubuntu-latest
+    container: gcc:16.1.0
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y ninja-build python3 wget git
+
+      - name: Install pinned CMake
+        run: |
+          set -eu
+          archive="${RUNNER_TEMP}/cmake.tar.gz"
+          wget -q -O "$archive" "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz"
+          echo "${CMAKE_SHA256}  ${archive}" | sha256sum -c -
+          tar -xzf "$archive" -C /opt
+          ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/cmake" /usr/local/bin/cmake
+
+      # libstdc++ and libgcc are linked statically: the machine that runs the binary need not have
+      # GCC 16. The C library stays dynamic, and the step prints the oldest glibc that satisfies it.
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++ \
+            -DCPPMCACHE_BUILD_TESTS=OFF "-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"
+          cmake --build build
+          if ldd build/cppmcache | grep -E 'libstdc\+\+|libgcc_s'; then
+            echo "::error::the binary still depends on the GCC runtime libraries"
+            exit 1
+          fi
+          echo "glibc required: $(objdump -T build/cppmcache | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+
+      - name: Package and test
+        run: python3 tools/package_release.py --binary build/cppmcache --platform linux-x86_64 --compiler g++ --family gcc
+
+      - name: Upload package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-linux-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  # The Linux binary is built in a container; this runs it on stock runners, where projects will.
+  linux-portability:
+    name: Linux package on ${{ matrix.os }}
+    needs: linux
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package-linux-x86_64
+          path: dist
+
+      - name: Run the packaged binary
+        run: |
+          set -euo pipefail
+          mkdir unpacked
+          tar -xzf dist/cppmcache-*-linux-x86_64.tar.gz -C unpacked
+          binary="$(echo "$PWD"/unpacked/*/bin/cppmcache)"
+          "$binary" --version
+          CPPMCACHE_DIR="${RUNNER_TEMP}/cache" "$binary" -s
+          echo "BINARY=$binary" >> "$GITHUB_ENV"
+
+      # Only the newer image has a Clang that knows the module options the test uses.
+      - name: Compile a modules project through it
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          cmake -DCPPMCACHE="$BINARY" -DCOMPILER="$(command -v clang++-18)" -DFAMILY=clang -DVARIANT=cmake \
+            -DWORK_DIR="${RUNNER_TEMP}/smoke" -P tests/integration/Modules.cmake
+
+  macos:
+    name: Package, macOS arm64
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned CMake
+        uses: jwlawson/actions-setup-cmake@0d6a7d60b009d01c9e7523be22153ff8f19460d3 # v2.2.0
+        with:
+          cmake-version: ${{ env.CMAKE_VERSION }}
+
+      - name: Install upstream LLVM and Ninja
+        run: |
+          set -euo pipefail
+          brew install llvm@21 ninja
+          echo "CPPMCACHE_LLVM_ROOT=$(brew --prefix llvm@21)" >> "$GITHUB_ENV"
+
+      # libc++ is linked statically: the machine that runs the binary need not have Homebrew's LLVM.
+      - name: Build
+        run: |
+          set -euo pipefail
+          libraries="${CPPMCACHE_LLVM_ROOT}/lib/c++"
+          ls "$libraries"/libc++.a "$libraries"/libc++abi.a
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release --toolchain cmake/toolchains/macos-llvm.cmake \
+            -DCPPMCACHE_BUILD_TESTS=OFF -DCMAKE_EXE_LINKER_FLAGS=-nostdlib++ \
+            "-DCMAKE_CXX_STANDARD_LIBRARIES=${libraries}/libc++.a ${libraries}/libc++abi.a"
+          cmake --build build
+          otool -L build/cppmcache
+          if otool -L build/cppmcache | grep -Ei 'homebrew|/opt/|libc\+\+'; then
+            echo "::error::the binary still depends on a C++ runtime library"
+            exit 1
+          fi
+
+      - name: Package and test
+        run: |
+          python3 tools/package_release.py --binary build/cppmcache --platform macos-arm64 \
+            --compiler "${CPPMCACHE_LLVM_ROOT}/bin/clang++" --family clang
+
+      - name: Upload package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-macos-arm64
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    name: Package, Windows x86_64
+    runs-on: windows-2025
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned CMake
+        uses: jwlawson/actions-setup-cmake@0d6a7d60b009d01c9e7523be22153ff8f19460d3 # v2.2.0
+        with:
+          cmake-version: ${{ env.CMAKE_VERSION }}
+
+      - name: Install Ninja
+        run: choco install ninja --no-progress -y
+
+      - name: Set up the MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: x64
+
+      # The C and C++ runtimes are linked statically: no Visual C++ redistributable is needed.
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=cl \
+            -DCPPMCACHE_BUILD_TESTS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          cmake --build build
+          dumpbin -dependents build/cppmcache.exe
+          if dumpbin -dependents build/cppmcache.exe | grep -Ei 'vcruntime|msvcp|ucrtbase|api-ms-win-crt'; then
+            echo "::error::the binary still depends on the Visual C++ runtime"
+            exit 1
+          fi
+
+      - name: Package and test
+        shell: bash
+        run: python tools/package_release.py --binary build/cppmcache.exe --platform windows-x86_64 --compiler cl --family msvc
+
+      - name: Upload package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-windows-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, linux-portability, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+
+      - name: Write checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum cppmcache-* > SHA256SUMS
+          cat SHA256SUMS
+
+      # A signed statement that these files were built by this workflow from this commit, which
+      # `gh attestation verify <file> --repo ambroise-leclerc/cppmcache` checks.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/cppmcache-*
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "cppmcache ${TAG#v}" --generate-notes --verify-tag
