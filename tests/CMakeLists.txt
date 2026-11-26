@@ -4,7 +4,6 @@
 # Unit tests: SpecLab scenarios (https://github.com/ambroise-leclerc/SpecLab), imported through CPM.
 # Pinned by SHA and not by tag name: a moving reference would change the test framework under a
 # frozen commit. The commit is SpecLab v0.4.0; to upgrade, change the quoted tag and the SHA.
-include(${PROJECT_SOURCE_DIR}/cmake/CPM.cmake)
 CPMAddPackage(
     NAME SpecLab
     GITHUB_REPOSITORY ambroise-leclerc/SpecLab
@@ -22,6 +21,7 @@ add_executable(cppmcache_spec
     spec/ProtoSpec.cpp
     spec/DriverSpec.cpp
     spec/MsvcSpec.cpp
+    spec/HttpSpec.cpp
     spec/StoreSpec.cpp)
 target_link_libraries(cppmcache_spec PRIVATE cppmcache_core speclab::speclab)
 cppmcache_configure_target(cppmcache_spec)
@@ -107,3 +107,31 @@ add_test(NAME integration.cpm-consumer
         -DTOOLCHAIN=${consumer_toolchain}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/integration/Consumer.cmake)
 set_tests_properties(integration.cpm-consumer PROPERTIES LABELS "integration;cpm" TIMEOUT 900)
+
+# The remote cache: several local cache directories share one server. CacheServer.py starts a
+# server of Bazel's HTTP caching protocol for the duration of the test, unless
+# CPPMCACHE_TEST_REMOTE already names one (CI does that with a real bazel-remote).
+find_package(Python3 COMPONENTS Interpreter)
+if(CPPMCACHE_REMOTE AND Python3_Interpreter_FOUND)
+    string(TOLOWER "${CMAKE_CXX_COMPILER_ID}" remote_family)
+    if(remote_family STREQUAL "gnu")
+        set(remote_family gcc)
+    endif()
+    foreach(encoding plain chunked)
+        set(server_options "")
+        if(encoding STREQUAL "chunked")
+            set(server_options --chunked)
+        endif()
+        add_test(NAME integration.remote.${encoding}
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/integration/CacheServer.py ${server_options} --
+                ${CMAKE_COMMAND}
+                -DCPPMCACHE=$<TARGET_FILE:cppmcache>
+                -DCOMPILER=${CMAKE_CXX_COMPILER}
+                -DFAMILY=${remote_family}
+                -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/integration-remote-${encoding}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/integration/Remote.cmake)
+        set_tests_properties(integration.remote.${encoding} PROPERTIES LABELS "integration;remote")
+    endforeach()
+else()
+    message(STATUS "Remote cache integration tests skipped: they need CPPMCACHE_REMOTE=ON and a Python 3 interpreter")
+endif()

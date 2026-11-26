@@ -13,6 +13,8 @@ import cppmcache.hash;
 import cppmcache.process;
 import cppmcache.proto;
 import cppmcache.reapi;
+import cppmcache.remote;
+import cppmcache.http;
 import cppmcache.store;
 
 namespace fs = std::filesystem;
@@ -167,7 +169,8 @@ struct Context {
     Store&                 store;
     const Config&          config;
     fs::path               cwd;
-    CompilerKind           kind = CompilerKind::unknown;
+    CompilerKind           kind   = CompilerKind::unknown;
+    RemoteCache*           remote = nullptr;  // remote cache, when one is configured and usable
     Invocation             invocation{};
     ModuleMap              modules{};
     fs::path               sourceAbsolute{};
@@ -265,65 +268,195 @@ struct Context {
     }
 };
 
-// Looks for a manifest entry valid for the current state of the files and restores its outputs.
-std::optional<int> lookup(Context& context) {
-    const auto encoded = context.store.manifestGet(context.manifestKey);
-    if (!encoded) {
+// Name, in an ActionResult stored under a manifest key, of the output that holds the manifest.
+constexpr std::string_view manifestOutput = "manifest";
+
+// Content of a blob, from the local CAS or else from the remote cache. A blob that came from the
+// remote cache is checked against its digest and kept locally.
+std::optional<std::string> fetchBlob(Context& context, const Digest& digest) {
+    if (context.store.casHas(digest)) {
+        return readFile(context.store.casPath(digest));
+    }
+    if (context.remote == nullptr) {
         return std::nullopt;
     }
-    const auto entries = decodeManifest(*encoded);
-    for (const auto& entry : entries | std::views::reverse) {
-        bool matches = true;
-        for (const auto& dependency : entry.dependencies) {
-            const auto info = context.store.fileInfo(absoluteNormal(context.cwd, dependency.path));
-            if (!info || info->digest != dependency.digest) {
-                matches = false;
-                break;
-            }
-        }
-        for (const auto& import : entry.imports) {
-            if (!matches) {
-                break;
-            }
-            const auto found = context.modules.files.find(import.name);
-            const auto info  = found == context.modules.files.end() ? std::nullopt : context.store.fileInfo(absoluteNormal(context.cwd, found->second));
-            matches          = info && info->digest == import.digest;
-        }
-        matches = matches && std::ranges::all_of(entry.provides, [&](const std::string& name) {
-                      return context.modules.files.contains(name);
-                  });
-        if (!matches) {
-            continue;
-        }
+    auto content = context.remote->get("cas", digest.hash);
+    if (!content) {
+        return std::nullopt;
+    }
+    if (digestOf(*content) != digest) {
+        context.log("error", std::format("remote blob {} does not match its digest", digest.hash));
+        context.store.count("remote_error");
+        return std::nullopt;
+    }
+    context.store.casPut(*content);
+    return content;
+}
 
-        const auto [action, actionDigest] = context.action(entry);
-        const auto resultBytes            = context.store.actionGet(actionDigest);
-        const auto result                 = resultBytes ? ActionResult::decode(*resultBytes) : std::nullopt;
-        if (!result || result->exitCode != 0) {
-            continue;
+// The manifest the remote cache holds for the current manifest key. A manifest is not a REAPI
+// notion: it is stored as the single output of an ActionResult filed under the manifest key, which
+// any server of the protocol accepts.
+std::optional<std::string> remoteManifest(Context& context) {
+    if (context.remote == nullptr) {
+        return std::nullopt;
+    }
+    const auto encoded = context.remote->get("ac", context.manifestKey);
+    const auto result  = encoded ? ActionResult::decode(*encoded) : std::nullopt;
+    if (!result) {
+        return std::nullopt;
+    }
+    for (const auto& file : result->outputFiles) {
+        if (file.path == manifestOutput) {
+            return fetchBlob(context, file.digest);
         }
-        const bool complete = std::ranges::all_of(result->outputFiles, [&](const OutputFile& file) {
-            return context.store.casHas(file.digest) && context.outputPath(file.path).has_value();
-        });
-        if (!complete) {
-            continue;
-        }
-        bool restored = true;
-        for (const auto& file : result->outputFiles) {
-            restored = restored && context.store.casRestore(file.digest, *context.outputPath(file.path));
-        }
-        if (!restored) {
-            context.log("error", "restoration impossible");
-            return std::nullopt;
-        }
-        context.writeDepfile(entry);
-        emit(std::cout, result->stdoutRaw);
-        emit(std::cerr, result->stderrRaw);
-        context.store.count("hit");
-        context.log("hit", actionDigest.hash);
-        return result->exitCode;
     }
     return std::nullopt;
+}
+
+// Whether a manifest entry describes the current state of the files.
+bool entryMatches(Context& context, const ManifestEntry& entry) {
+    for (const auto& dependency : entry.dependencies) {
+        const auto info = context.store.fileInfo(absoluteNormal(context.cwd, dependency.path));
+        if (!info || info->digest != dependency.digest) {
+            return false;
+        }
+    }
+    for (const auto& import : entry.imports) {
+        const auto found = context.modules.files.find(import.name);
+        const auto info  = found == context.modules.files.end() ? std::nullopt : context.store.fileInfo(absoluteNormal(context.cwd, found->second));
+        if (!info || info->digest != import.digest) {
+            return false;
+        }
+    }
+    return std::ranges::all_of(entry.provides, [&](const std::string& name) {
+        return context.modules.files.contains(name);
+    });
+}
+
+// Restores the outputs recorded for a matching entry. What the local store lacks is fetched from
+// the remote cache. Returns nothing if the result is not available anywhere.
+std::optional<int> serve(Context& context, const ManifestEntry& entry) {
+    Store& store                      = context.store;
+    const auto [action, actionDigest] = context.action(entry);
+    auto resultBytes                  = store.actionGet(actionDigest);
+    bool fromRemote                   = false;
+    if (!resultBytes && context.remote != nullptr) {
+        resultBytes = context.remote->get("ac", actionDigest.hash);
+        fromRemote  = resultBytes.has_value();
+    }
+    const auto result = resultBytes ? ActionResult::decode(*resultBytes) : std::nullopt;
+    if (!result || result->exitCode != 0) {
+        return std::nullopt;
+    }
+    for (const auto& file : result->outputFiles) {
+        if (!context.outputPath(file.path).has_value()) {
+            return std::nullopt;
+        }
+        if (!store.casHas(file.digest)) {
+            if (!fetchBlob(context, file.digest)) {
+                return std::nullopt;
+            }
+            fromRemote = true;
+        }
+    }
+    if (fromRemote) {
+        store.actionPut(actionDigest, *resultBytes);
+    }
+    bool restored = true;
+    for (const auto& file : result->outputFiles) {
+        restored = restored && store.casRestore(file.digest, *context.outputPath(file.path));
+    }
+    if (!restored) {
+        context.log("error", "restoration impossible");
+        return std::nullopt;
+    }
+    context.writeDepfile(entry);
+    emit(std::cout, result->stdoutRaw);
+    emit(std::cerr, result->stderrRaw);
+    store.count("hit");
+    if (fromRemote) {
+        store.count("remote_hit");
+    }
+    context.log(fromRemote ? "remote hit" : "hit", actionDigest.hash);
+    return result->exitCode;
+}
+
+// Looks for a manifest entry valid for the current state of the files and restores its outputs.
+// The local manifest is tried first, so that a local hit costs no network request.
+std::optional<int> lookup(Context& context) {
+    auto entries = decodeManifest(context.store.manifestGet(context.manifestKey).value_or(""));
+    for (const auto& entry : entries | std::views::reverse) {
+        if (entryMatches(context, entry)) {
+            if (const auto exitCode = serve(context, entry)) {
+                return exitCode;
+            }
+        }
+    }
+    if (context.remote == nullptr) {
+        return std::nullopt;
+    }
+    // Entries another machine recorded: they are merged into the local manifest, then tried.
+    std::vector<ManifestEntry> fresh;
+    if (const auto remote = remoteManifest(context)) {
+        for (auto& entry : decodeManifest(*remote)) {
+            if (!std::ranges::contains(entries, entry)) {
+                fresh.push_back(std::move(entry));
+            }
+        }
+    }
+    if (!fresh.empty()) {
+        entries.insert(entries.end(), fresh.begin(), fresh.end());
+        if (entries.size() > maxManifestEntries) {
+            entries.erase(entries.begin(), entries.end() - static_cast<std::ptrdiff_t>(maxManifestEntries));
+        }
+        context.store.manifestPut(context.manifestKey, encodeManifest(entries));
+        for (const auto& entry : fresh | std::views::reverse) {
+            if (entryMatches(context, entry)) {
+                if (const auto exitCode = serve(context, entry)) {
+                    return exitCode;
+                }
+            }
+        }
+    }
+    context.store.count("remote_miss");
+    return std::nullopt;
+}
+
+// Publishes a freshly stored result to the remote cache: the output blobs, the ActionResult, then
+// the manifest, merged with the one the server already holds.
+void upload(Context& context, const std::vector<ManifestEntry>& localEntries, const Digest& actionDigest, const ActionResult& result) {
+    RemoteCache& remote = *context.remote;
+    bool         stored = true;
+    for (const auto& file : result.outputFiles) {
+        if (remote.has("cas", file.digest.hash)) {
+            continue;
+        }
+        const auto content = readFile(context.store.casPath(file.digest));
+        stored             = stored && content && remote.put("cas", file.digest.hash, *content);
+    }
+    stored = stored && remote.put("ac", actionDigest.hash, result.encode());
+    if (stored) {
+        // Entries the server knows and this machine does not are kept, as the oldest ones.
+        std::vector<ManifestEntry> merged;
+        if (const auto known = remoteManifest(context)) {
+            for (auto& entry : decodeManifest(*known)) {
+                if (!std::ranges::contains(localEntries, entry)) {
+                    merged.push_back(std::move(entry));
+                }
+            }
+        }
+        merged.insert(merged.end(), localEntries.begin(), localEntries.end());
+        if (merged.size() > maxManifestEntries) {
+            merged.erase(merged.begin(), merged.end() - static_cast<std::ptrdiff_t>(maxManifestEntries));
+        }
+        const std::string manifest = encodeManifest(merged);
+        ActionResult      holder;
+        holder.outputFiles.push_back({std::string{manifestOutput}, digestOf(manifest)});
+        stored = remote.put("cas", holder.outputFiles.front().digest.hash, manifest) && remote.put("ac", context.manifestKey, holder.encode());
+    }
+    if (stored) {
+        context.store.count("remote_store");
+    }
 }
 
 // Actually compiles, then records the result if all the inputs could be identified.
@@ -533,6 +666,9 @@ int compileAndStore(Context& context, const std::vector<std::string>& original) 
         entries.erase(entries.begin(), entries.end() - static_cast<std::ptrdiff_t>(maxManifestEntries));
     }
     store.manifestPut(context.manifestKey, encodeManifest(entries));
+    if (context.remote != nullptr && !context.config.remoteReadOnly) {
+        upload(context, entries, actionDigest, result);
+    }
 
     store.count("miss");
     context.log("miss", actionDigest.hash);
@@ -675,12 +811,36 @@ int runCompiler(const Config& config, const std::vector<std::string>& commandLin
     }
     context.manifestKey = key.finishHex();
 
+    // The remote cache, if one is configured. A wrong URL or an unreachable server never fails a
+    // compilation: the local cache alone is used.
+    std::optional<RemoteCache> remote;
+    if (!config.remoteUrl.empty()) {
+        if (const auto url = parseHttpUrl(config.remoteUrl); url && RemoteCache::available()) {
+            remote.emplace(*url, config.remoteTimeoutMillis);
+            context.remote = &*remote;
+        } else {
+            store.count("remote_error");
+            context.log("remote error",
+                        url ? "this cppmcache was built without remote cache support"
+                            : std::format("CPPMCACHE_REMOTE is not an http:// URL: {}", config.remoteUrl));
+        }
+    }
+    const auto reportRemote = [&] {
+        if (remote && remote->errors() > 0) {
+            store.count("remote_error");
+            context.log("remote error", remote->lastError());
+        }
+    };
+
     if (!config.recache) {
         if (const auto exitCode = lookup(context)) {
+            reportRemote();
             return *exitCode;
         }
     }
-    return compileAndStore(context, original);
+    const int exitCode = compileAndStore(context, original);
+    reportRemote();
+    return exitCode;
 }
 
 }  // namespace cppmcache
