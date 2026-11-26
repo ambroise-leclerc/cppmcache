@@ -1,4 +1,9 @@
-// Orchestration d'un appel : clé de manifeste, recherche, restauration ou compilation puis stockage.
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ambroise Leclerc
+/**
+ * @file Cache.cppm
+ * @brief Orchestration of a call: manifest key, lookup, restoration or compilation then storage.
+ */
 export module cppmcache.cache;
 
 import std;
@@ -14,22 +19,22 @@ namespace fs = std::filesystem;
 
 export namespace cppmcache {
 
-// Une entrée de manifeste décrit un jeu d'entrées déjà rencontré pour une même clé de manifeste.
+// A manifest entry describes a set of inputs already encountered for a given manifest key.
 struct ManifestEntry {
     struct Dependency {
-        std::string path; // tel qu'écrit par le compilateur, relatif au dossier de travail ou absolu
-        Digest digest;
+        std::string path;  // as written by the compiler, relative to the working directory or absolute
+        Digest      digest;
         friend bool operator==(const Dependency&, const Dependency&) = default;
     };
     struct Import {
         std::string name;
-        Digest digest;
-        bool direct = false; // importé par l'unité elle-même, et non par un module importé
+        Digest      digest;
+        bool        direct                                   = false;  // imported by the unit itself, and not by an imported module
         friend bool operator==(const Import&, const Import&) = default;
     };
 
-    std::vector<Dependency> dependencies;
-    std::vector<Import> imports;
+    std::vector<Dependency>  dependencies;
+    std::vector<Import>      imports;
     std::vector<std::string> provides;
 
     friend bool operator==(const ManifestEntry&, const ManifestEntry&) = default;
@@ -62,14 +67,14 @@ std::string encodeManifest(const std::vector<ManifestEntry>& entries) {
 
 std::vector<ManifestEntry> decodeManifest(std::string_view encoded) {
     std::vector<ManifestEntry> entries;
-    ProtoReader manifest{encoded};
+    ProtoReader                manifest{encoded};
     while (const auto entryField = manifest.next()) {
         if (entryField->number != 1 || entryField->wire != 2) {
             continue;
         }
         ManifestEntry entry;
-        bool valid = true;
-        ProtoReader reader{entryField->data};
+        bool          valid = true;
+        ProtoReader   reader{entryField->data};
         while (const auto field = reader.next()) {
             if (field->wire != 2) {
                 continue;
@@ -79,8 +84,8 @@ std::vector<ManifestEntry> decodeManifest(std::string_view encoded) {
                 continue;
             }
             std::string text;
-            Digest digest;
-            bool flag = false;
+            Digest      digest;
+            bool        flag = false;
             ProtoReader item{field->data};
             while (const auto part = item.next()) {
                 if (part->number == 1 && part->wire == 2) {
@@ -109,23 +114,35 @@ std::vector<ManifestEntry> decodeManifest(std::string_view encoded) {
     return manifest.ok() ? entries : std::vector<ManifestEntry>{};
 }
 
-} // namespace cppmcache
+}  // namespace cppmcache
 
 namespace cppmcache {
 
-constexpr std::string_view formatVersion = "1";
-constexpr std::size_t maxManifestEntries = 32;
+constexpr std::string_view formatVersion      = "2";
+constexpr std::size_t      maxManifestEntries = 32;
 
-// Variables d'environnement qui influencent la sortie du compilateur.
-constexpr std::array<const char*, 12> hashedEnvironment{
-    "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "SOURCE_DATE_EPOCH", "GCC_EXEC_PREFIX",
-    "COMPILER_PATH", "LANG", "LC_ALL", "LC_MESSAGES", "LC_CTYPE", "GCC_COLORS"};
+// Environment variables that influence the compiler's output.
+constexpr std::array<const char*, 13> hashedEnvironment{"CPATH",
+                                                        "C_INCLUDE_PATH",
+                                                        "CPLUS_INCLUDE_PATH",
+                                                        "OBJC_INCLUDE_PATH",
+                                                        "SOURCE_DATE_EPOCH",
+                                                        "GCC_EXEC_PREFIX",
+                                                        "COMPILER_PATH",
+                                                        "LANG",
+                                                        "LC_ALL",
+                                                        "LC_MESSAGES",
+                                                        "LC_CTYPE",
+                                                        "GCC_COLORS",
+                                                        "CCC_OVERRIDE_OPTIONS"};
 
 fs::path absoluteNormal(const fs::path& cwd, const fs::path& path) {
     return (path.is_absolute() ? path : cwd / path).lexically_normal();
 }
 
-std::string virtualSource(const fs::path& absolute) { return "src/" + absolute.generic_string(); }
+std::string virtualSource(const fs::path& absolute) {
+    return "src/" + absolute.generic_string();
+}
 
 void emit(std::ostream& stream, std::string_view text) {
     if (!text.empty()) {
@@ -143,19 +160,20 @@ void writeText(const fs::path& path, std::string_view text) {
     output.write(text.data(), static_cast<std::streamsize>(text.size()));
 }
 
-// Tout ce qui est commun à la recherche et au stockage pour un appel donné.
+// Everything that is common to lookup and storage for a given call.
 struct Context {
-    Store& store;
-    const Config& config;
-    fs::path cwd;
-    Invocation invocation{};
-    ModuleMap modules{};
-    fs::path sourceAbsolute{};
-    Digest sourceDigest{};
-    Command command{};
-    Digest commandDigest{};
+    Store&                 store;
+    const Config&          config;
+    fs::path               cwd;
+    CompilerKind           kind = CompilerKind::unknown;
+    Invocation             invocation{};
+    ModuleMap              modules{};
+    fs::path               sourceAbsolute{};
+    Digest                 sourceDigest{};
+    Command                command{};
+    Digest                 commandDigest{};
     std::vector<NameValue> platform{};
-    std::string manifestKey{};
+    std::string            manifestKey{};
 
     void log(std::string_view outcome, std::string_view detail = {}) const {
         if (config.log.empty()) {
@@ -165,7 +183,7 @@ struct Context {
         output << std::format("{}\t{}\t{}\n", outcome, invocation.object, detail);
     }
 
-    // Digest de l'Action REAPI correspondant à une entrée de manifeste.
+    // Digest of the REAPI Action corresponding to a manifest entry.
     std::pair<Action, Digest> action(const ManifestEntry& entry) const {
         InputTree tree;
         tree.add(virtualSource(sourceAbsolute), sourceDigest);
@@ -186,13 +204,19 @@ struct Context {
         for (const auto& name : entry.provides) {
             full.outputPaths.push_back("bmi/" + name);
         }
+        if (!invocation.moduleOutput.empty()) {
+            full.outputPaths.emplace_back("bmi");
+        }
         return full;
     }
 
-    // Chemin de sortie d'un fichier de l'ActionResult dans la commande courante.
+    // Output path of a file of the ActionResult in the current command.
     std::optional<fs::path> outputPath(std::string_view logical) const {
         if (logical == "obj") {
             return cwd / invocation.object;
+        }
+        if (logical == "bmi" && !invocation.moduleOutput.empty()) {
+            return absoluteNormal(cwd, invocation.moduleOutput);
         }
         if (logical.starts_with("bmi/")) {
             if (const auto found = modules.files.find(std::string{logical.substr(4)}); found != modules.files.end()) {
@@ -210,29 +234,36 @@ struct Context {
         for (const auto& dependency : entry.dependencies) {
             prerequisites.push_back(dependency.path);
         }
-        if (!invocation.moduleMap.empty()) {
-            prerequisites.push_back(invocation.moduleMap);
-        }
-        std::vector<std::string> direct;
-        for (const auto& import : entry.imports) {
-            prerequisites.push_back(modules.files.at(import.name));
-            if (import.direct) {
-                direct.push_back(import.name);
-            }
-        }
+        std::vector<std::string>                         direct;
         std::vector<std::pair<std::string, std::string>> provided;
-        for (const auto& name : entry.provides) {
-            provided.emplace_back(name, modules.files.at(name));
-        }
-        if (!invocation.makeModuleRules) {
-            provided.clear();
-            direct.clear();
+        if (kind == CompilerKind::clang) {
+            // Clang lists only some of the BMIs read: `direct` marks those it had listed.
+            for (const auto& import : entry.imports) {
+                if (import.direct) {
+                    prerequisites.push_back(modules.files.at(import.name));
+                }
+            }
+        } else {
+            if (!invocation.moduleMap.empty()) {
+                prerequisites.push_back(invocation.moduleMap);
+            }
+            for (const auto& import : entry.imports) {
+                prerequisites.push_back(modules.files.at(import.name));
+                if (import.direct && invocation.makeModuleRules) {
+                    direct.push_back(import.name);
+                }
+            }
+            if (invocation.makeModuleRules) {
+                for (const auto& name : entry.provides) {
+                    provided.emplace_back(name, modules.files.at(name));
+                }
+            }
         }
         writeText(cwd / invocation.depfile, renderDepfile(invocation.depTarget, prerequisites, provided, direct));
     }
 };
 
-// Cherche une entrée de manifeste valide pour l'état courant des fichiers et restaure ses sorties.
+// Looks for a manifest entry valid for the current state of the files and restores its outputs.
 std::optional<int> lookup(Context& context) {
     const auto encoded = context.store.manifestGet(context.manifestKey);
     if (!encoded) {
@@ -253,21 +284,19 @@ std::optional<int> lookup(Context& context) {
                 break;
             }
             const auto found = context.modules.files.find(import.name);
-            const auto info = found == context.modules.files.end()
-                                  ? std::nullopt
-                                  : context.store.fileInfo(absoluteNormal(context.cwd, found->second));
-            matches = info && info->digest == import.digest;
+            const auto info  = found == context.modules.files.end() ? std::nullopt : context.store.fileInfo(absoluteNormal(context.cwd, found->second));
+            matches          = info && info->digest == import.digest;
         }
         matches = matches && std::ranges::all_of(entry.provides, [&](const std::string& name) {
-            return context.modules.files.contains(name);
-        });
+                      return context.modules.files.contains(name);
+                  });
         if (!matches) {
             continue;
         }
 
         const auto [action, actionDigest] = context.action(entry);
-        const auto resultBytes = context.store.actionGet(actionDigest);
-        const auto result = resultBytes ? ActionResult::decode(*resultBytes) : std::nullopt;
+        const auto resultBytes            = context.store.actionGet(actionDigest);
+        const auto result                 = resultBytes ? ActionResult::decode(*resultBytes) : std::nullopt;
         if (!result || result->exitCode != 0) {
             continue;
         }
@@ -282,7 +311,7 @@ std::optional<int> lookup(Context& context) {
             restored = restored && context.store.casRestore(file.digest, *context.outputPath(file.path));
         }
         if (!restored) {
-            context.log("erreur", "restauration impossible");
+            context.log("error", "restoration impossible");
             return std::nullopt;
         }
         context.writeDepfile(entry);
@@ -295,36 +324,36 @@ std::optional<int> lookup(Context& context) {
     return std::nullopt;
 }
 
-// Compile réellement, puis enregistre le résultat si toutes les entrées ont pu être identifiées.
+// Actually compiles, then records the result if all the inputs could be identified.
 int compileAndStore(Context& context, const std::vector<std::string>& original) {
-    Store& store = context.store;
+    Store&            store      = context.store;
     const Invocation& invocation = context.invocation;
 
     std::vector<std::string> commandLine = original;
-    fs::path depfile = context.cwd / invocation.depfile;
-    const bool ownDepfile = invocation.depfile.empty();
+    fs::path                 depfile     = context.cwd / invocation.depfile;
+    const bool               ownDepfile  = invocation.depfile.empty();
     if (ownDepfile) {
         depfile = store.temporaryFile(".d");
         commandLine.insert(commandLine.end(), {"-MD", "-MF", depfile.string()});
     }
     const fs::path capturedOutput = store.temporaryFile(".out");
-    const fs::path capturedError = store.temporaryFile(".err");
+    const fs::path capturedError  = store.temporaryFile(".err");
 
-    // État des BMI de la table avant la compilation : ceux qui changent sont ceux que l'unité fournit.
-    // Le fichier de dépendances ne le dit pas toujours (voir Invocation::makeModuleRules).
+    // State of the table's BMIs before the compilation: those that change are those the unit provides.
+    // The dependency file does not always say so (see Invocation::makeModuleRules).
     struct FileState {
-        bool exists = false;
-        std::uintmax_t size = 0;
+        bool               exists = false;
+        std::uintmax_t     size   = 0;
         fs::file_time_type modified{};
-        bool operator==(const FileState&) const = default;
+        bool               operator==(const FileState&) const = default;
     };
     const auto stateOf = [&](const std::string& file) {
         std::error_code ignored;
-        const fs::path path = absoluteNormal(context.cwd, file);
-        FileState state;
+        const fs::path  path = absoluteNormal(context.cwd, file);
+        FileState       state;
         state.exists = fs::is_regular_file(path, ignored);
         if (state.exists) {
-            state.size = fs::file_size(path, ignored);
+            state.size     = fs::file_size(path, ignored);
             state.modified = fs::last_write_time(path, ignored);
         }
         return state;
@@ -334,12 +363,12 @@ int compileAndStore(Context& context, const std::vector<std::string>& original) 
         before[name] = stateOf(file);
     }
 
-    const auto started = fs::file_time_type::clock::now();
-    const int exitCode = executeCaptured(commandLine, capturedOutput, capturedError);
+    const auto        started        = fs::file_time_type::clock::now();
+    const int         exitCode       = executeCaptured(commandLine, capturedOutput, capturedError);
     const std::string standardOutput = readFile(capturedOutput).value_or("");
-    const std::string standardError = readFile(capturedError).value_or("");
-    const auto depText = readFile(depfile);
-    std::error_code error;
+    const std::string standardError  = readFile(capturedError).value_or("");
+    const auto        depText        = readFile(depfile);
+    std::error_code   error;
     fs::remove(capturedOutput, error);
     fs::remove(capturedError, error);
     if (ownDepfile) {
@@ -350,26 +379,25 @@ int compileAndStore(Context& context, const std::vector<std::string>& original) 
 
     if (exitCode != 0) {
         store.count("failed");
-        context.log("échec", std::format("code {}", exitCode));
+        context.log("failed", std::format("code {}", exitCode));
         return exitCode;
     }
     const auto uncacheable = [&](std::string_view reason) {
         store.count("uncacheable");
-        context.log("non stocké", reason);
+        context.log("not stored", reason);
         return exitCode;
     };
     if (!depText) {
-        return uncacheable("fichier de dépendances absent");
+        return uncacheable("dependency file missing");
     }
 
-    // Classement des fichiers lus par le compilateur : en-têtes d'un côté, BMI importés de l'autre.
-    const DepInfo deps = parseDepfile(*depText);
+    // Classification of the files read by the compiler: headers on one side, imported BMIs on the other.
+    const DepInfo                   deps = parseDepfile(*depText);
     std::map<fs::path, std::string> moduleOfFile;
     for (const auto& [name, file] : context.modules.files) {
         moduleOfFile[absoluteNormal(context.cwd, file)] = name;
     }
-    const fs::path moduleMapAbsolute =
-        invocation.moduleMap.empty() ? fs::path{} : absoluteNormal(context.cwd, invocation.moduleMap);
+    const fs::path moduleMapAbsolute = invocation.moduleMap.empty() ? fs::path{} : absoluteNormal(context.cwd, invocation.moduleMap);
 
     ManifestEntry entry;
     entry.provides = deps.provides;
@@ -381,6 +409,7 @@ int compileAndStore(Context& context, const std::vector<std::string>& original) 
     }
     std::ranges::sort(entry.provides);
     std::vector<std::string> importNames;
+    std::vector<std::string> listedImports;  // BMIs of the table listed in the dependency file
     for (const auto& prerequisite : deps.prerequisites) {
         const fs::path absolute = absoluteNormal(context.cwd, prerequisite);
         if (absolute == context.sourceAbsolute || absolute == moduleMapAbsolute) {
@@ -388,27 +417,28 @@ int compileAndStore(Context& context, const std::vector<std::string>& original) 
         }
         if (const auto found = moduleOfFile.find(absolute); found != moduleOfFile.end()) {
             if (std::ranges::contains(entry.provides, found->second)) {
-                return uncacheable(std::format("l'unité lit le BMI qu'elle produit : {}", found->second));
+                return uncacheable(std::format("the unit reads the BMI it produces: {}", found->second));
             }
             importNames.push_back(found->second);
+            listedImports.push_back(found->second);
             continue;
         }
         const auto info = store.fileInfo(absolute);
         if (!info) {
-            return uncacheable(std::format("dépendance illisible : {}", prerequisite));
+            return uncacheable(std::format("unreadable dependency: {}", prerequisite));
         }
-        // Un BMI absent de la table est un import indirect : GCC le retrouve par le chemin inscrit
-        // dans le BMI qui l'importe. Il est donc lié à son chemin, comme un en-tête.
-        const bool binaryInterface = absolute.extension() == ".gcm" || absolute.extension() == ".bmi";
+        // A BMI absent from the table is an indirect import: GCC finds it through the path recorded
+        // in the BMI that imports it. It is therefore tied to its path, like a header.
+        const bool binaryInterface = absolute.extension() == ".gcm" || absolute.extension() == ".bmi" || absolute.extension() == ".pcm";
         if (binaryInterface) {
             entry.dependencies.push_back({prerequisite, info->digest});
             continue;
         }
         if (info->timeMacros) {
-            return uncacheable(std::format("macro d'horodatage dans {}", prerequisite));
+            return uncacheable(std::format("timestamp macro in {}", prerequisite));
         }
         if (fs::last_write_time(absolute, error) >= started) {
-            return uncacheable(std::format("modifié pendant la compilation : {}", prerequisite));
+            return uncacheable(std::format("modified during the compilation: {}", prerequisite));
         }
         entry.dependencies.push_back({prerequisite, info->digest});
     }
@@ -417,29 +447,38 @@ int compileAndStore(Context& context, const std::vector<std::string>& original) 
             importNames.push_back(name);
         }
     }
+    if (context.kind == CompilerKind::clang) {
+        // Clang does not say which BMIs it actually read: all those of the command count.
+        for (const auto& [name, file] : context.modules.files) {
+            if (!std::ranges::contains(importNames, name)) {
+                importNames.push_back(name);
+            }
+        }
+    }
+    const auto& directImports = context.kind == CompilerKind::clang ? listedImports : deps.imports;
     for (const auto& name : importNames) {
         const auto found = context.modules.files.find(name);
         if (found == context.modules.files.end()) {
-            return uncacheable(std::format("module importé absent de la table : {}", name));
+            return uncacheable(std::format("imported module absent from the table: {}", name));
         }
         const auto info = store.fileInfo(absoluteNormal(context.cwd, found->second));
         if (!info) {
-            return uncacheable(std::format("BMI illisible : {}", found->second));
+            return uncacheable(std::format("unreadable BMI: {}", found->second));
         }
-        entry.imports.push_back({name, info->digest, std::ranges::contains(deps.imports, name)});
+        entry.imports.push_back({name, info->digest, std::ranges::contains(directImports, name)});
     }
     std::ranges::sort(entry.imports, {}, &ManifestEntry::Import::name);
     if (fs::last_write_time(context.sourceAbsolute, error) >= started) {
-        return uncacheable("source modifiée pendant la compilation");
+        return uncacheable("source modified during the compilation");
     }
 
-    // Sorties : l'objet et les BMI fournis.
+    // Outputs: the object and the BMIs provided.
     ActionResult result;
-    result.exitCode = exitCode;
-    result.stdoutRaw = standardOutput;
-    result.stderrRaw = standardError;
+    result.exitCode      = exitCode;
+    result.stdoutRaw     = standardOutput;
+    result.stderrRaw     = standardError;
     const auto addOutput = [&](std::string logical) {
-        const auto path = context.outputPath(logical);
+        const auto path    = context.outputPath(logical);
         const auto content = path ? readFile(*path) : std::nullopt;
         if (!content) {
             return false;
@@ -448,12 +487,15 @@ int compileAndStore(Context& context, const std::vector<std::string>& original) 
         return true;
     };
     if (!addOutput("obj")) {
-        return uncacheable("fichier objet introuvable");
+        return uncacheable("object file not found");
     }
     for (const auto& name : entry.provides) {
         if (!addOutput("bmi/" + name)) {
-            return uncacheable(std::format("BMI produit introuvable : {}", name));
+            return uncacheable(std::format("produced BMI not found: {}", name));
         }
+    }
+    if (!invocation.moduleOutput.empty() && !addOutput("bmi")) {
+        return uncacheable("produced BMI not found");
     }
 
     const auto [action, actionDigest] = context.action(entry);
@@ -474,13 +516,13 @@ int compileAndStore(Context& context, const std::vector<std::string>& original) 
     return exitCode;
 }
 
-} // namespace cppmcache
+}  // namespace cppmcache
 
 export namespace cppmcache {
 
-// Point d'entrée du mode « launcher ». `commandLine` = [clé=valeur…] compilateur arguments…
+// Entry point of the "launcher" mode. `commandLine` = [key=value…] compiler arguments…
 int runCompiler(const Config& config, const std::vector<std::string>& commandLine) {
-    std::size_t first = 0;
+    std::size_t              first = 0;
     std::vector<std::string> extraFiles;
     while (first < commandLine.size()) {
         const auto setting = parseSetting(commandLine[first]);
@@ -502,7 +544,7 @@ int runCompiler(const Config& config, const std::vector<std::string>& commandLin
         ++first;
     }
     if (first >= commandLine.size()) {
-        std::println(std::cerr, "cppmcache: aucun compilateur sur la ligne de commande");
+        std::println(std::cerr, "cppmcache: no compiler on the command line");
         return 1;
     }
     const std::vector<std::string> original{commandLine.begin() + static_cast<std::ptrdiff_t>(first), commandLine.end()};
@@ -510,61 +552,67 @@ int runCompiler(const Config& config, const std::vector<std::string>& commandLin
         return execute(original);
     }
 
-    Store store{config.directory};
-    Context context{.store = store, .config = config, .cwd = fs::current_path()};
+    Store      store{config.directory};
+    Context    context{.store = store, .config = config, .cwd = fs::current_path()};
     const auto bypass = [&](std::string_view reason) {
         store.count("bypass");
-        context.log("direct", reason);
+        context.log("passthrough", reason);
         return execute(original);
     };
 
     const auto compiler = findProgram(original.front());
-    if (!compiler || detectCompiler(*compiler) != CompilerKind::gcc) {
-        std::error_code error;
-        const auto resolved = compiler ? fs::canonical(*compiler, error) : fs::path{};
-        if (!compiler || error || detectCompiler(resolved) != CompilerKind::gcc) {
-            return bypass(std::format("compilateur non pris en charge : {}", original.front()));
+    if (compiler) {
+        // The invocation name first, then the target of the symbolic link (c++ → g++, for example).
+        context.kind = detectCompiler(*compiler);
+        if (context.kind == CompilerKind::unknown) {
+            std::error_code error;
+            const fs::path  resolved = fs::canonical(*compiler, error);
+            context.kind             = error ? CompilerKind::unknown : detectCompiler(resolved);
         }
     }
-    const std::vector<std::string> arguments =
-        expandResponseFiles({original.begin() + 1, original.end()}, context.cwd);
-    context.invocation = parseGcc(arguments);
-    const Invocation& invocation = context.invocation;
+    if (context.kind == CompilerKind::unknown) {
+        return bypass(std::format("unsupported compiler: {}", original.front()));
+    }
+    const std::vector<std::string> arguments = expandResponseFiles({original.begin() + 1, original.end()}, context.cwd);
+    context.invocation                       = parseCommand(context.kind, arguments);
+    const Invocation& invocation             = context.invocation;
     if (!invocation.bypass.empty()) {
         return bypass(invocation.bypass);
     }
     if (environment("DEPENDENCIES_OUTPUT") || environment("SUNPRO_DEPENDENCIES")) {
-        return bypass("DEPENDENCIES_OUTPUT est défini");
+        return bypass("DEPENDENCIES_OUTPUT is set");
     }
 
     context.sourceAbsolute = absoluteNormal(context.cwd, invocation.source);
-    const auto sourceInfo = store.fileInfo(context.sourceAbsolute);
+    const auto sourceInfo  = store.fileInfo(context.sourceAbsolute);
     if (!sourceInfo) {
-        return bypass("source illisible");
+        return bypass("unreadable source");
     }
     if (sourceInfo->timeMacros) {
-        return bypass("macro d'horodatage dans la source");
+        return bypass("timestamp macro in the source");
     }
     context.sourceDigest = sourceInfo->digest;
 
+    context.modules.files = invocation.moduleFiles;
     if (!invocation.moduleMap.empty()) {
         const auto text = readFile(context.cwd / invocation.moduleMap);
         if (!text) {
-            return bypass("table des modules illisible");
+            return bypass("unreadable module table");
         }
         context.modules = parseGccModuleMap(*text);
         if (context.modules.headerUnits) {
-            return bypass("header units non prises en charge");
+            return bypass("header units not supported");
         }
     }
 
-    // Identité du compilateur : chemin réel, taille et date de l'exécutable.
+    // Identity of the compiler: real path, size and date of the executable.
     std::error_code error;
-    const fs::path compilerReal = fs::canonical(*compiler, error);
-    const auto compilerSize = error ? 0 : fs::file_size(compilerReal, error);
-    const auto compilerTime = error ? 0 : fs::last_write_time(compilerReal, error).time_since_epoch().count();
+    const fs::path  compilerReal = fs::canonical(*compiler, error);
+    const auto      compilerSize = error ? 0 : fs::file_size(compilerReal, error);
+    const auto      compilerTime = error ? 0
+                                         : std::chrono::duration_cast<std::chrono::nanoseconds>(fs::last_write_time(compilerReal, error).time_since_epoch()).count();
     if (error) {
-        return bypass("compilateur illisible");
+        return bypass("unreadable compiler");
     }
     context.platform = {
         {"cppmcache.compiler", std::format("{}|{}|{}", compilerReal.generic_string(), compilerSize, compilerTime)},
@@ -575,7 +623,7 @@ int runCompiler(const Config& config, const std::vector<std::string>& commandLin
     for (const auto& file : extraFiles) {
         const auto info = store.fileInfo(absoluteNormal(context.cwd, file));
         if (!info) {
-            return bypass(std::format("extra_files_to_hash illisible : {}", file));
+            return bypass(std::format("unreadable extra_files_to_hash: {}", file));
         }
         context.platform.emplace_back("cppmcache.extra." + file, info->digest.hash);
     }
@@ -604,4 +652,4 @@ int runCompiler(const Config& config, const std::vector<std::string>& commandLin
     return compileAndStore(context, original);
 }
 
-} // namespace cppmcache
+}  // namespace cppmcache

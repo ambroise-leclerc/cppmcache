@@ -1,0 +1,24 @@
+name: Feature request
+description: A compiler, an option or a workflow cppmcache does not handle yet
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: Please write in English.
+  - type: textarea
+    id: need
+    attributes:
+      label: What you are trying to do
+      description: The project or build you would like to cache, and what stops you today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: What the tool should do. If a command is currently passed through uncached, paste it together with its `CPPMCACHE_LOG` line.
+  - type: textarea
+    id: correctness
+    attributes:
+      label: What must go into the key
+      description: Optional. Which inputs can change the output of this compilation, and how the tool can find them.

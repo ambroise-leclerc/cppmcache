@@ -1,5 +1,11 @@
-// Sous-ensemble des messages de la Remote Execution API v2 (build.bazel.remote.execution.v2),
-// encodés de façon canonique. Les numéros de champs sont ceux de remote_execution.proto.
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ambroise Leclerc
+/**
+ * @file Reapi.cppm
+ * @brief Subset of the Remote Execution API v2 messages, canonically encoded.
+ *
+ * The field numbers are those of remote_execution.proto (build.bazel.remote.execution.v2).
+ */
 export module cppmcache.reapi;
 
 import std;
@@ -18,7 +24,7 @@ std::string encodeDigest(const Digest& digest) {
 }
 
 std::optional<Digest> decodeDigest(std::string_view encoded) {
-    Digest digest;
+    Digest      digest;
     ProtoReader reader{encoded};
     while (const auto field = reader.next()) {
         if (field->number == 1 && field->wire == 2) {
@@ -35,8 +41,8 @@ std::optional<Digest> decodeDigest(std::string_view encoded) {
 
 struct Command {
     std::vector<std::string> arguments;
-    std::vector<NameValue> environment;  // trié par nom à l'encodage
-    std::vector<std::string> outputPaths; // trié à l'encodage
+    std::vector<NameValue>   environment;  // sorted by name when encoding
+    std::vector<std::string> outputPaths;  // sorted when encoding
 
     std::string encode() const {
         ProtoWriter writer;
@@ -61,9 +67,9 @@ struct Command {
 };
 
 struct Action {
-    Digest command;
-    Digest inputRoot;
-    std::vector<NameValue> platform; // trié par nom à l'encodage
+    Digest                 command;
+    Digest                 inputRoot;
+    std::vector<NameValue> platform;  // sorted by name when encoding
 
     std::string encode() const {
         ProtoWriter writer;
@@ -87,14 +93,14 @@ struct Action {
 
 struct OutputFile {
     std::string path;
-    Digest digest;
+    Digest      digest;
 };
 
 struct ActionResult {
     std::vector<OutputFile> outputFiles;
-    int exitCode = 0;
-    std::string stdoutRaw;
-    std::string stderrRaw;
+    int                     exitCode = 0;
+    std::string             stdoutRaw;
+    std::string             stderrRaw;
 
     std::string encode() const {
         ProtoWriter writer;
@@ -112,10 +118,10 @@ struct ActionResult {
 
     static std::optional<ActionResult> decode(std::string_view encoded) {
         ActionResult result;
-        ProtoReader reader{encoded};
+        ProtoReader  reader{encoded};
         while (const auto field = reader.next()) {
             if (field->number == 2 && field->wire == 2) {
-                OutputFile file;
+                OutputFile  file;
                 ProtoReader output{field->data};
                 while (const auto part = output.next()) {
                     if (part->number == 1 && part->wire == 2) {
@@ -147,13 +153,13 @@ struct ActionResult {
     }
 };
 
-// Arbre d'entrées d'une Action : un arbre de Merkle de messages Directory.
+// Input tree of an Action: a Merkle tree of Directory messages.
 class InputTree {
 public:
-    // `path` est découpé sur '/' et '\\' ; les composants vides et "." sont ignorés.
+    // `path` is split on '/' and '\\'; empty and "." components are ignored.
     void add(std::string_view path, const Digest& digest) {
-        Node* node = &root_;
-        std::string component;
+        Node*                    node = &root_;
+        std::string              component;
         std::vector<std::string> components;
         for (const char c : path) {
             if (c == '/' || c == '\\') {
@@ -178,12 +184,14 @@ public:
         node->files[component] = digest;
     }
 
-    // Digest du Directory racine. Si `blobs` est fourni, il reçoit tous les Directory encodés.
-    Digest rootDigest(std::vector<std::string>* blobs = nullptr) const { return digestNode(root_, blobs); }
+    // Digest of the root Directory. If `blobs` is provided, it receives every encoded Directory.
+    Digest rootDigest(std::vector<std::string>* blobs = nullptr) const {
+        return digestNode(root_, blobs);
+    }
 
 private:
     struct Node {
-        std::map<std::string, Digest> files;
+        std::map<std::string, Digest>                files;
         std::map<std::string, std::unique_ptr<Node>> directories;
     };
 
@@ -201,8 +209,8 @@ private:
             directory.message(2, encodeDigest(digestNode(*child, blobs)));
             writer.message(2, directory.take());
         }
-        std::string encoded = writer.take();
-        const Digest digest = digestOf(encoded);
+        std::string  encoded = writer.take();
+        const Digest digest  = digestOf(encoded);
         if (blobs != nullptr) {
             blobs->push_back(std::move(encoded));
         }
@@ -212,4 +220,4 @@ private:
     Node root_;
 };
 
-} // namespace cppmcache
+}  // namespace cppmcache
