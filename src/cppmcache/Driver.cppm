@@ -647,6 +647,20 @@ std::string renderDepfile(std::string_view                                      
     return out;
 }
 
+// A path in the form two spellings of the same file compare equal in. Windows file names are not
+// case-sensitive, and MSVC reports the files it read in lower case, with backslashes.
+fs::path comparablePath(const fs::path& original) {
+#ifdef _WIN32
+    std::string text = original.lexically_normal().generic_string();
+    std::ranges::transform(text, text.begin(), [](char c) {
+        return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+    });
+    return fs::path{text};
+#else
+    return original.lexically_normal();
+#endif
+}
+
 // Header shadowing. A recorded header can be hidden by a file created later, earlier in the search
 // order: `#include <vulkan/vulkan.h>` then finds the new file, although every file the previous
 // compilation read is unchanged. The functions below work out where such a file would have to be,
@@ -743,9 +757,11 @@ std::vector<std::string> shadowCandidates(const SearchPath&               search
                                           const fs::path&                 cwd,
                                           const std::string&              source,
                                           const std::vector<std::string>& dependencies) {
+    // Every path is made comparable first: on Windows the compiler's report and the command line
+    // do not spell a directory the same way.
     const auto absolute = [&](const std::string& path) {
         const fs::path candidate{path};
-        return (candidate.is_absolute() ? candidate : cwd / candidate).lexically_normal();
+        return comparablePath(candidate.is_absolute() ? candidate : cwd / candidate);
     };
     // Path of `file` relative to `directory`, if it lies under it.
     const auto under = [](const fs::path& file, const fs::path& directory) -> std::optional<fs::path> {
@@ -819,17 +835,8 @@ std::optional<std::string> relocatablePath(std::string_view path, const fs::path
     if (base.empty() || path.empty()) {
         return std::nullopt;
     }
-    // Windows file names are not case-sensitive, and MSVC reports included files in lower case.
     const auto fold = [](const fs::path& original) {
-#ifdef _WIN32
-        std::string text = original.lexically_normal().generic_string();
-        std::ranges::transform(text, text.begin(), [](char c) {
-            return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
-        });
-        return fs::path{text};
-#else
-        return original.lexically_normal();
-#endif
+        return comparablePath(original);
     };
     const fs::path candidate{path};
     if (!candidate.is_absolute()) {

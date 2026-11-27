@@ -16,10 +16,11 @@ using speclab::core::Assertions;
 using speclab::core::Checks;
 using Paths = std::vector<std::string>;
 
-// Absolute paths have a different shape on each platform.
+// Absolute paths have a different shape on each platform. On Windows candidates are reported in
+// lower case, the form in which two spellings of a path compare equal.
 #ifdef _WIN32
-const std::string root = "C:/p";
-const std::string sdk  = "C:/sdk/include";
+const std::string root = "c:/p";
+const std::string sdk  = "c:/sdk/include";
 #else
 const std::string root = "/p";
 const std::string sdk  = "/usr/include";
@@ -228,5 +229,32 @@ const speclab::Register toolchainHeaders{
                   })
             .Execute();
     }};
+
+#ifdef _WIN32
+const speclab::Register windowsSpelling{"Shadowing: MSVC spells the files it read differently from the command line", "unit,shadow,msvc", [] {
+                                            return speclab::Test("SHADOW-009")
+                                                .Then("case and separators do not hide a header from the search directory that contains it",
+                                                      [] {
+                                                          // /sourceDependencies reports lower-case paths with backslashes; the working directory
+                                                          // and the /I directories keep the case they were written in.
+                                                          const SearchPath path{
+                                                              {},
+                                                              {"first", "Second"}
+                                                          };
+                                                          const Paths candidates = shadowCandidates(path,
+                                                                                                    {"first", "Second"},
+                                                                                                    "D:/Work/Project",
+                                                                                                    "src/main.cpp",
+                                                                                                    {"d:\\work\\project\\second\\shadow\\config.h"});
+                                                          Checks      checks;
+                                                          checks.expect(contains(candidates, "d:/work/project/first/shadow/config.h"),
+                                                                        "the earlier directory is a candidate");
+                                                          checks.expect(contains(candidates, "d:/work/project/src/shadow/config.h"),
+                                                                        "and so is the directory of the source");
+                                                          checks.raise();
+                                                      })
+                                                .Execute();
+                                        }};
+#endif
 
 }  // namespace
