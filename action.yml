@@ -10,8 +10,16 @@ branding:
 
 inputs:
   version:
-    description: Version to install, such as 0.1.1, or "latest".
+    description: Version to install, such as 0.1.2, or "latest".
     default: latest
+  sha256sums:
+    description: >-
+      Digests the archive must match, in the format of a release's SHA256SUMS file: one
+      "<sha256>  <archive name>" line per archive, so that one value serves every platform. When
+      given, the archive is compared with the line for its own name before anything is extracted or
+      run, the release's own SHA256SUMS is not used, and version must name a release, not "latest".
+      Empty to rely on the release's SHA256SUMS alone.
+    default: ""
   cache:
     description: Keep the cache directory between workflow runs with actions/cache ("true" or "false").
     default: "true"
@@ -51,6 +59,7 @@ runs:
       shell: bash
       env:
         CPPMCACHE_SETUP_VERSION: ${{ inputs.version }}
+        CPPMCACHE_SETUP_SHA256SUMS: ${{ inputs.sha256sums }}
         CPPMCACHE_SETUP_BASE: ${{ inputs.base-directory }}
         CPPMCACHE_SETUP_REMOTE: ${{ inputs.remote }}
         CPPMCACHE_SETUP_TOKEN: ${{ inputs.token }}
@@ -68,6 +77,10 @@ runs:
         esac
 
         version="${CPPMCACHE_SETUP_VERSION#v}"
+        if [ -n "$CPPMCACHE_SETUP_SHA256SUMS" ] && [ "$version" = "latest" ]; then
+          echo "::error::sha256sums pins the digests of one release: give version as well, not \"latest\"."
+          exit 1
+        fi
         if [ "$version" = "latest" ]; then
           version="$(curl -fsSL -H "Authorization: Bearer ${CPPMCACHE_SETUP_TOKEN}" -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${repository}/releases/latest" | sed -n 's/^ *"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -1)"
@@ -82,11 +95,22 @@ runs:
         download="${RUNNER_TEMP}/cppmcache-download"
         rm -rf "$download"
         mkdir -p "$download"
-        curl -fsSL -o "${download}/${name}.${archive}" "${base_url}/${name}.${archive}"
-        curl -fsSL -o "${download}/SHA256SUMS" "${base_url}/SHA256SUMS"
+        # The token served only to look up the latest release. Nothing downloaded may see it.
+        unset CPPMCACHE_SETUP_TOKEN
 
-        # The archive must be the one the release workflow published.
-        expected="$(sed -n "s/^\([0-9a-f]\{64\}\)  ${name}\.${archive}\$/\1/p" "${download}/SHA256SUMS")"
+        curl -fsSL -o "${download}/${name}.${archive}" "${base_url}/${name}.${archive}"
+        # The archive must be the one the caller pinned or, failing that, the one the release lists.
+        # A caller's digests are the stronger check: SHA256SUMS comes from the same release as the
+        # archive, so replacing both together would pass it. Either way the comparison is made
+        # before the archive is extracted and before anything from it runs.
+        if [ -n "$CPPMCACHE_SETUP_SHA256SUMS" ]; then
+          printf '%s\n' "$CPPMCACHE_SETUP_SHA256SUMS" | tr -d '\r' > "${download}/SHA256SUMS"
+          source_of_digest="the sha256sums input"
+        else
+          curl -fsSL -o "${download}/SHA256SUMS" "${base_url}/SHA256SUMS"
+          source_of_digest="the release's SHA256SUMS"
+        fi
+        expected="$(sed -n "s/^ *\([0-9a-f]\{64\}\)  ${name}\.${archive} *\$/\1/p" "${download}/SHA256SUMS")"
         # The file is read from standard input: given a Windows path, with its backslashes,
         # sha256sum prefixes the digest with a backslash to say that it escaped the file name.
         if command -v sha256sum > /dev/null; then
@@ -94,8 +118,12 @@ runs:
         else
           actual="$(shasum -a 256 < "${download}/${name}.${archive}" | cut -d' ' -f1)"
         fi
-        if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
-          echo "::error::Checksum mismatch for ${name}.${archive}: expected '${expected}', got '${actual}'."
+        if [ -z "$expected" ]; then
+          echo "::error::${source_of_digest} has no digest for ${name}.${archive}."
+          exit 1
+        fi
+        if [ "$expected" != "$actual" ]; then
+          echo "::error::Checksum mismatch for ${name}.${archive}: ${source_of_digest} says '${expected}', the download is '${actual}'. Nothing was extracted."
           exit 1
         fi
 

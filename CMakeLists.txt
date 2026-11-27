@@ -17,7 +17,7 @@ if(NOT DEFINED PROJECT_NAME)
     set(CMAKE_CXX_EXTENSIONS OFF)
 endif()
 
-project(cppmcache VERSION 0.1.1
+project(cppmcache VERSION 0.1.2
     DESCRIPTION "C++ compiler cache that understands named modules"
     HOMEPAGE_URL "https://github.com/ambroise-leclerc/cppmcache"
     LANGUAGES CXX)

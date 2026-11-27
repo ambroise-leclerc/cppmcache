@@ -352,6 +352,18 @@ jobs:
         run: |
           if gh release view --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
+            tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+            sums="$(gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --output -)"
+            {
+              echo "version=${tag#v}"
+              # The same digests with each one altered, for the negative case.
+              echo "sums<<END_OF_SUMS"
+              printf '%s\n' "$sums"
+              echo "END_OF_SUMS"
+              echo "wrong-sums<<END_OF_SUMS"
+              printf '%s\n' "$sums" | sed 's/^......../00000000/'
+              echo "END_OF_SUMS"
+            } >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "No release yet: the action cannot be exercised." >> "$GITHUB_STEP_SUMMARY"
@@ -393,6 +405,45 @@ jobs:
         run: |
           cmake -DCPPMCACHE="$(command -v cppmcache)" -DCOMPILER="$(command -v clang++-18)" -DFAMILY=clang -DVARIANT=cmake \
             -DWORK_DIR="${RUNNER_TEMP}/action-smoke" -P tests/integration/Modules.cmake
+
+      # With digests supplied by the caller, as a project that pins the binary uses the action.
+      - name: Install cppmcache with pinned digests
+        if: steps.release.outputs.exists == 'true'
+        uses: ./
+        with:
+          version: ${{ steps.release.outputs.version }}
+          sha256sums: ${{ steps.release.outputs.sums }}
+          cache: "false"
+
+      - name: Remove the installation
+        if: steps.release.outputs.exists == 'true'
+        shell: bash
+        run: rm -rf "${RUNNER_TOOL_CACHE:-${RUNNER_TEMP}}/cppmcache"
+
+      # The negative case of #31: a digest that does not match must stop the action before the
+      # archive is extracted, so before anything from it can run.
+      - name: Install cppmcache with a wrong digest
+        if: steps.release.outputs.exists == 'true'
+        id: wrong-digest
+        continue-on-error: true
+        uses: ./
+        with:
+          version: ${{ steps.release.outputs.version }}
+          sha256sums: ${{ steps.release.outputs.wrong-sums }}
+          cache: "false"
+
+      - name: Check that the wrong digest was refused before extraction
+        if: steps.release.outputs.exists == 'true'
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.wrong-digest.outcome }}
+        run: |
+          set -euo pipefail
+          test "$OUTCOME" = "failure"
+          if [ -e "${RUNNER_TOOL_CACHE:-${RUNNER_TEMP}}/cppmcache" ]; then
+            echo "::error::the archive was extracted although its digest did not match"
+            exit 1
+          fi
 
   # The same action inside a container job, as a project that builds in a compiler image uses it.
   setup-action-container:

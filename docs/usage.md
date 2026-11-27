@@ -8,7 +8,7 @@ The repository is also an action that installs a released binary, checks it agai
 of the release, puts it on the `PATH` and keeps the cache directory between runs.
 
 ```yaml
-- uses: ambroise-leclerc/cppmcache@v0.1.1
+- uses: ambroise-leclerc/cppmcache@v0.1.2
   with:
     cache-key: ${{ matrix.compiler }}   # jobs that must not share a cache get different values
 - run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER_LAUNCHER=cppmcache
@@ -18,7 +18,8 @@ of the release, puts it on the `PATH` and keeps the cache directory between runs
 
 | Input            | Default                    | Meaning                                                        |
 |------------------|----------------------------|----------------------------------------------------------------|
-| `version`        | `latest`                   | version to install, such as `0.1.1`                            |
+| `version`        | `latest`                   | version to install, such as `0.1.2`                            |
+| `sha256sums`     | empty                      | digests the archive must match, in `SHA256SUMS` format         |
 | `cache`          | `true`                     | restore and save the cache directory with `actions/cache`      |
 | `cache-key`      | empty                      | text added to the key of the saved cache                       |
 | `base-directory` | the workspace              | sets `CPPMCACHE_BASEDIR`; empty leaves relocation off          |
@@ -34,6 +35,25 @@ steps, and its outputs are `version`, `path` and `cache-directory`.
   eviction yet, so that copy grows until GitHub's own limits remove old ones.
 - Each release carries a `SHA256SUMS` file, which the action checks, and a build provenance
   attestation: `gh attestation verify <archive> --repo ambroise-leclerc/cppmcache`.
+- That file comes from the same release as the archive, so it detects a corrupted download but not
+  a release whose archive and `SHA256SUMS` were both replaced. To pin the binary itself, pass the
+  digests you trust as `sha256sums`, in the same format, with an explicit `version`. The action then
+  compares the archive with them before extracting it or running anything from it, and does not
+  download the release's file. One value serves every platform, since each runner picks the line
+  for its own archive:
+
+  ```yaml
+  - uses: ambroise-leclerc/cppmcache@<commit>   # v0.1.2
+    with:
+      version: 0.1.2
+      sha256sums: |
+        <sha256>  cppmcache-0.1.2-linux-x86_64.tar.gz
+        <sha256>  cppmcache-0.1.2-macos-arm64.tar.gz
+        <sha256>  cppmcache-0.1.2-windows-x86_64.zip
+  ```
+
+- The token the action is given serves only to look up the latest release; it is removed from the
+  environment before the downloaded binary runs.
 
 ## Sharing a cache between locations
 
