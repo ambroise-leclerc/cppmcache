@@ -130,7 +130,7 @@ std::vector<ManifestEntry> decodeManifest(std::string_view encoded) {
 
 namespace cppmcache {
 
-constexpr std::string_view formatVersion      = "5";
+constexpr std::string_view formatVersion      = "6";
 constexpr std::size_t      maxManifestEntries = 32;
 
 // Environment variables that influence the compiler's output.
@@ -456,7 +456,12 @@ std::optional<std::vector<std::string>> presentShadows(Context& context, const M
         std::ranges::copy(environmentIncludeDirectories(), std::back_inserter(userDirectories));
     }
     for (const auto& candidate : shadowCandidates(*context.searchPath, userDirectories, context.cwd, context.invocation.source, headers)) {
-        if (fs::exists(candidate, error)) {
+        const bool regular = fs::is_regular_file(candidate, error);
+        if (error && error != std::errc::no_such_file_or_directory && error != std::errc::not_a_directory) {
+            context.log("error", "cannot inspect a shadow candidate");
+            return std::nullopt;
+        }
+        if (regular) {
             present.push_back(context.storedPath(candidate));
         }
     }

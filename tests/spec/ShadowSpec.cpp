@@ -179,7 +179,7 @@ const speclab::Register firstDirectory{
                       Checks      checks;
                       checks.expect(contains(candidates, root + "/src/mdux/config.h"), "beside the source");
                       checks.expect(contains(candidates, root + "/include/mdux/mdux/config.h"), "beside the header's own directory, as an includer");
-                      checks.expect(candidates.size() == 2, "no directory is searched before the first");
+                      checks.expect(contains(candidates, root + "/include/config.h"), "a name relative to an includer's directory");
                       checks.raise();
                   })
             .Execute();

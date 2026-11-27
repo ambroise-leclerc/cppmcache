@@ -804,13 +804,21 @@ std::vector<std::string> shadowCandidates(const SearchPath&               search
         }
     }
 
+    auto projectDirectories = user;
+    for (const auto& directory : includerDirectories) {
+        if (!std::ranges::contains(projectDirectories, directory)) {
+            projectDirectories.push_back(directory);
+        }
+    }
     std::set<std::string> candidates;
     for (const auto& file : files) {
+        bool foundUnderSearchPath = false;
         for (std::size_t k = 0; k < ordered.size(); ++k) {
             const auto name = under(file, ordered[k]);
             if (!name) {
                 continue;
             }
+            foundUnderSearchPath = true;
             for (std::size_t i = 0; i < k; ++i) {
                 if (const fs::path candidate = (ordered[i] / *name).lexically_normal(); candidate != file) {
                     candidates.insert(candidate.generic_string());
@@ -819,6 +827,21 @@ std::vector<std::string> shadowCandidates(const SearchPath&               search
             for (const auto& directory : includerDirectories) {
                 if (const fs::path candidate = (directory / *name).lexically_normal(); candidate != file) {
                     candidates.insert(candidate.generic_string());
+                }
+            }
+        }
+        // A name containing `..` can resolve outside every search directory. Consider its
+        // spelling relative to each project directory, including directories of includers.
+        if (!foundUnderSearchPath || inUserDirectory(file)) {
+            for (const auto& origin : projectDirectories) {
+                const fs::path name = file.lexically_relative(origin);
+                if (name.empty() || name.is_absolute()) {
+                    continue;
+                }
+                for (const auto& directory : projectDirectories) {
+                    if (const fs::path candidate = (directory / name).lexically_normal(); candidate != file) {
+                        candidates.insert(candidate.generic_string());
+                    }
                 }
             }
         }

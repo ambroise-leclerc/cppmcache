@@ -45,7 +45,8 @@ object. ccache's direct mode has this limit; cppmcache checks for it.
   name it was presumably included by is its path relative to that directory. The same name in any
   directory searched earlier, or beside a file of the project, which is where a quoted include
   looks first, is a place where a shadowing header would be. Project directories include those
-  supplied through the compiler's include-path environment variables.
+  supplied through the compiler's include-path environment variables. Names relative to project
+  directories are also considered, including names containing `..` that leave a search directory.
 - **The check.** A manifest entry records which of those places were already occupied when it was
   made: they did not win then. On lookup, a file in any other of those places invalidates the
   entry, and the unit is compiled again.
