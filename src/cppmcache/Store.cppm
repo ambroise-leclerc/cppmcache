@@ -169,6 +169,15 @@ public:
         writeAtomic(shard("ac", action.hash), result);
     }
 
+    // The include search path of a compiler for a set of options, memoised: asking for it costs a run
+    // of the compiler.
+    std::optional<std::string> searchPathGet(std::string_view key) const {
+        return readFile(shard("search", key));
+    }
+    void searchPathPut(std::string_view key, std::string_view searchPath) {
+        writeAtomic(shard("search", key), searchPath);
+    }
+
     std::optional<std::string> manifestGet(std::string_view key) const {
         return readFile(shard("manifest", key));
     }
@@ -260,7 +269,7 @@ public:
 
     void clear() {
         std::error_code error;
-        for (const char* directory : {"cas", "ac", "manifest", "stat", "tmp"}) {
+        for (const char* directory : {"cas", "ac", "manifest", "stat", "search", "tmp"}) {
             fs::remove_all(root_ / directory, error);
         }
     }

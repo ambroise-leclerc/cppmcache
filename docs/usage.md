@@ -8,7 +8,7 @@ The repository is also an action that installs a released binary, checks it agai
 of the release, puts it on the `PATH` and keeps the cache directory between runs.
 
 ```yaml
-- uses: ambroise-leclerc/cppmcache@v0.1.0
+- uses: ambroise-leclerc/cppmcache@v0.1.1
   with:
     cache-key: ${{ matrix.compiler }}   # jobs that must not share a cache get different values
 - run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER_LAUNCHER=cppmcache
@@ -18,7 +18,7 @@ of the release, puts it on the `PATH` and keeps the cache directory between runs
 
 | Input            | Default                    | Meaning                                                        |
 |------------------|----------------------------|----------------------------------------------------------------|
-| `version`        | `latest`                   | version to install, such as `0.1.0`                            |
+| `version`        | `latest`                   | version to install, such as `0.1.1`                            |
 | `cache`          | `true`                     | restore and save the cache directory with `actions/cache`      |
 | `cache-key`      | empty                      | text added to the key of the saved cache                       |
 | `base-directory` | the workspace              | sets `CPPMCACHE_BASEDIR`; empty leaves relocation off          |
@@ -129,8 +129,10 @@ cmake --install build --prefix ~/.local
   With GCC this does not matter: the interface digest ignores what a BMI says about its location.
 - Early cutoff depends on the compiler producing an identical BMI. With GCC, shifting the lines of
   an interface changes its BMI; with Clang and MSVC, any edit to the interface source does.
-- As with ccache's direct mode, a newly created header that shadows another one later in the
-  include path is not detected.
+- A header created where it shadows a recorded one is detected, and the unit is recompiled (see
+  [design.md](design.md#header-shadowing)). The detection covers the directories of the search path
+  and those of the project's own files. It does not cover a header added inside the toolchain's
+  directories next to a toolchain header that includes it with quotes, nor macOS frameworks.
 - Not cached: coverage and profiling builds, `-gsplit-dwarf`, header units, `-MMD`, Clang's
   two-phase `--precompile`, units that use `__DATE__` or `__TIME__`, and linking.
 - With MSVC, `/Zi` is not cached, because it writes debug information to a PDB shared between

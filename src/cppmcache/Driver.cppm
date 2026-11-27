@@ -52,12 +52,13 @@ struct Invocation {
     std::vector<std::string>           keyArguments;  // arguments that go into the key, output paths removed
     std::string                        source;
     std::string                        object;
-    std::string                        depfile;       // empty: the command does not request a dependency file
-    std::string                        depTarget;     // target written in the dependency file
-    std::string                        moduleMap;     // GCC: module name → BMI mapping file, empty if absent
-    std::string                        moduleOutput;  // Clang, MSVC: BMI produced (-fmodule-output=, /ifcOutput), empty if absent
-    std::map<std::string, std::string> moduleFiles;   // Clang, MSVC: -fmodule-file=name=path, /reference name=path
-    std::string                        bypass;        // reason why the command is not cacheable, empty otherwise
+    std::string                        depfile;             // empty: the command does not request a dependency file
+    std::string                        depTarget;           // target written in the dependency file
+    std::string                        moduleMap;           // GCC: module name → BMI mapping file, empty if absent
+    std::string                        moduleOutput;        // Clang, MSVC: BMI produced (-fmodule-output=, /ifcOutput), empty if absent
+    std::map<std::string, std::string> moduleFiles;         // Clang, MSVC: -fmodule-file=name=path, /reference name=path
+    std::vector<std::string>           includeDirectories;  // directories named by -I, -iquote, -isystem, -idirafter, /I…, in order
+    std::string                        bypass;              // reason why the command is not cacheable, empty otherwise
     // With -fdeps-format=, GCC no longer writes the `name.c++-module` rules in the dependency file.
     bool makeModuleRules = true;
 };
@@ -160,6 +161,9 @@ Invocation parseCommand(CompilerKind kind, const std::vector<std::string>& argum
                                                                "-fdiagnostics-add-output",
                                                                "-Wp,",
                                                                "-Wa,"};
+    // Options that add a directory to the include search path, the longest first so that a joined
+    // value is split at the right place.
+    static const std::array<std::string_view, 4> includeOptions{"-idirafter", "-isystem", "-iquote", "-I"};
     static const std::set<std::string_view>
         sourceExtensions{".cpp", ".cc", ".cxx", ".c++", ".C", ".cppm", ".ccm", ".cxxm", ".c++m", ".ixx", ".mpp", ".mxx", ".c", ".i", ".ii"};
 
@@ -256,9 +260,19 @@ Invocation parseCommand(CompilerKind kind, const std::vector<std::string>& argum
                 if (argument == "-x") {
                     explicitLanguage = true;
                 }
+                if (std::ranges::contains(includeOptions, std::string_view{argument})) {
+                    invocation.includeDirectories.push_back(arguments[i + 1]);
+                }
                 invocation.keyArguments.push_back(arguments[++i]);
             }
         } else if (argument.front() == '-') {
+            // -Idir, -isystemdir…: the directory is joined to the option.
+            for (const auto option : includeOptions) {
+                if (argument.starts_with(option) && argument.size() > option.size()) {
+                    invocation.includeDirectories.push_back(argument.substr(option.size()));
+                    break;
+                }
+            }
             invocation.keyArguments.push_back(argument);
         } else if (argument.front() == '@') {
             bypass(std::format("unreadable response file: {}", argument));
@@ -398,9 +412,19 @@ Invocation parseMsvc(const std::vector<std::string>& arguments) {
             invocation.keyArguments.push_back(std::format("/{}", option));
             invocation.keyArguments.push_back(source);
         } else if (separateValue.contains(option)) {
+            const std::string value = next();
+            if (option == "I" || option == "external:I") {
+                invocation.includeDirectories.push_back(value);
+            }
             invocation.keyArguments.push_back(std::format("/{}", option));
-            invocation.keyArguments.push_back(next());
+            invocation.keyArguments.push_back(value);
         } else {
+            // /Idir and /external:Idir: the directory is joined to the option.
+            if (option.starts_with("external:I") && option.size() > 10) {
+                invocation.includeDirectories.emplace_back(option.substr(10));
+            } else if (option.starts_with("I") && option.size() > 1) {
+                invocation.includeDirectories.emplace_back(option.substr(1));
+            }
             invocation.keyArguments.push_back(std::format("/{}", option));
         }
     }
@@ -623,6 +647,208 @@ std::string renderDepfile(std::string_view                                      
     return out;
 }
 
+// A path in the form two spellings of the same file compare equal in. Windows file names are not
+// case-sensitive, and MSVC reports the files it read in lower case, with backslashes.
+fs::path comparablePath(const fs::path& original) {
+#ifdef _WIN32
+    std::string text = original.lexically_normal().generic_string();
+    std::ranges::transform(text, text.begin(), [](char c) {
+        return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+    });
+    return fs::path{text};
+#else
+    return original.lexically_normal();
+#endif
+}
+
+// Header shadowing. A recorded header can be hidden by a file created later, earlier in the search
+// order: `#include <vulkan/vulkan.h>` then finds the new file, although every file the previous
+// compilation read is unchanged. The functions below work out where such a file would have to be,
+// so that a manifest entry can be refused when one has appeared.
+
+// The directories searched for included files, in order: for `#include "…"` first, then for both forms.
+struct SearchPath {
+    std::vector<std::string> quote;
+    std::vector<std::string> angle;
+};
+
+// Reads the search path GCC and Clang print with -v. The two headings contain `#include "..."` and
+// `#include <...>` in every locale; each directory is on a line of its own, after one space.
+std::optional<SearchPath> parseSearchPath(std::string_view verboseOutput) {
+    enum class Section { before, quote, angle, done };
+    SearchPath path;
+    Section    section = Section::before;
+    for (const auto lineRange : std::views::split(verboseOutput, '\n')) {
+        std::string_view line{lineRange.begin(), lineRange.end()};
+        if (!line.empty() && line.back() == '\r') {
+            line.remove_suffix(1);
+        }
+        if (section == Section::before) {
+            if (line.contains("#include \"...\"")) {
+                section = Section::quote;
+            }
+        } else if (section == Section::quote && line.contains("#include <...>")) {
+            section = Section::angle;
+        } else if (section == Section::quote || section == Section::angle) {
+            if (!line.starts_with(' ')) {
+                if (section == Section::angle) {
+                    section = Section::done;
+                    break;
+                }
+                continue;
+            }
+            line.remove_prefix(1);
+            // macOS frameworks are searched differently and are listed with a remark.
+            if (line.ends_with(')')) {
+                continue;
+            }
+            (section == Section::quote ? path.quote : path.angle).emplace_back(line);
+        }
+    }
+    if (section != Section::done) {
+        return std::nullopt;
+    }
+    return path;
+}
+
+// MSVC searches the /I directories in order, then those of the INCLUDE environment variable.
+SearchPath msvcSearchPath(const std::vector<std::string>& includeDirectories, std::string_view includeVariable) {
+    SearchPath path;
+    path.angle = includeDirectories;
+    for (const auto part : std::views::split(includeVariable, ';')) {
+        if (!part.empty()) {
+            path.angle.emplace_back(part.begin(), part.end());
+        }
+    }
+    return path;
+}
+
+// Arguments of the command that asks GCC or Clang for its search path: the options of the
+// compilation, without its source, its outputs and its module options, preprocessing `emptySource`.
+std::vector<std::string> searchPathProbe(const Invocation& invocation, const std::string& emptySource) {
+    std::vector<std::string> probe;
+    // C++ unless the source is plainly C; an explicit -x overrides the guess.
+    bool cplusplus = fs::path{invocation.source}.extension() != ".c";
+    for (std::size_t i = 0; i < invocation.keyArguments.size(); ++i) {
+        const std::string& argument = invocation.keyArguments[i];
+        if (argument == "-x" && i + 1 < invocation.keyArguments.size()) {
+            cplusplus = invocation.keyArguments[++i].starts_with("c++");
+            continue;
+        }
+        if (argument == "-c" || argument == invocation.source || argument.starts_with("-fmodule") || argument.starts_with("-fdeps-format")) {
+            continue;
+        }
+        probe.push_back(argument);
+    }
+    probe.insert(probe.end(), {"-E", "-v", "-x", cplusplus ? "c++" : "c", emptySource});
+    return probe;
+}
+
+// Where a file would have to be created to be found in place of one of `dependencies`. For each
+// dependency and each search directory that contains it, the name it was presumably included by is
+// its path relative to that directory; the same name in a directory searched earlier, or beside a
+// file of the project that may include it with quotes, would shadow it.
+//
+// The name an include directive used is not known, so every directory that contains the file gives
+// a hypothesis. A candidate that already exists and did not win is harmless: the caller records
+// which ones existed when the entry was made, and only a new one invalidates it.
+std::vector<std::string> shadowCandidates(const SearchPath&               searchPath,
+                                          const std::vector<std::string>& userDirectories,
+                                          const fs::path&                 cwd,
+                                          const std::string&              source,
+                                          const std::vector<std::string>& dependencies) {
+    // Every path is made comparable first: on Windows the compiler's report and the command line
+    // do not spell a directory the same way.
+    const auto absolute = [&](const std::string& path) {
+        const fs::path candidate{path};
+        return comparablePath(candidate.is_absolute() ? candidate : cwd / candidate);
+    };
+    // Path of `file` relative to `directory`, if it lies under it.
+    const auto under = [](const fs::path& file, const fs::path& directory) -> std::optional<fs::path> {
+        const fs::path relative = file.lexically_relative(directory);
+        if (relative.empty() || relative == "." || *relative.begin() == "..") {
+            return std::nullopt;
+        }
+        return relative;
+    };
+
+    std::vector<fs::path> ordered;
+    for (const auto& directory : searchPath.quote) {
+        ordered.push_back(absolute(directory));
+    }
+    for (const auto& directory : searchPath.angle) {
+        ordered.push_back(absolute(directory));
+    }
+    std::vector<fs::path> user;
+    for (const auto& directory : userDirectories) {
+        user.push_back(absolute(directory));
+    }
+    const auto inUserDirectory = [&](const fs::path& file) {
+        return std::ranges::any_of(user, [&](const fs::path& directory) {
+            return under(file, directory).has_value();
+        });
+    };
+
+    // Directories of the project's own files: a quoted include is looked up beside its includer
+    // before anywhere else. A header of the toolchain is not a file of the project.
+    std::vector<fs::path> includerDirectories{absolute(source).parent_path()};
+    std::vector<fs::path> files;
+    for (const auto& dependency : dependencies) {
+        const fs::path file = absolute(dependency);
+        files.push_back(file);
+        const bool searched = std::ranges::any_of(ordered, [&](const fs::path& directory) {
+            return under(file, directory).has_value();
+        });
+        if ((!searched || inUserDirectory(file)) && !std::ranges::contains(includerDirectories, file.parent_path())) {
+            includerDirectories.push_back(file.parent_path());
+        }
+    }
+
+    auto projectDirectories = user;
+    for (const auto& directory : includerDirectories) {
+        if (!std::ranges::contains(projectDirectories, directory)) {
+            projectDirectories.push_back(directory);
+        }
+    }
+    std::set<std::string> candidates;
+    for (const auto& file : files) {
+        bool foundUnderSearchPath = false;
+        for (std::size_t k = 0; k < ordered.size(); ++k) {
+            const auto name = under(file, ordered[k]);
+            if (!name) {
+                continue;
+            }
+            foundUnderSearchPath = true;
+            for (std::size_t i = 0; i < k; ++i) {
+                if (const fs::path candidate = (ordered[i] / *name).lexically_normal(); candidate != file) {
+                    candidates.insert(candidate.generic_string());
+                }
+            }
+            for (const auto& directory : includerDirectories) {
+                if (const fs::path candidate = (directory / *name).lexically_normal(); candidate != file) {
+                    candidates.insert(candidate.generic_string());
+                }
+            }
+        }
+        // A name containing `..` can resolve outside every search directory. Consider its
+        // spelling relative to each project directory, including directories of includers.
+        if (!foundUnderSearchPath || inUserDirectory(file)) {
+            for (const auto& origin : projectDirectories) {
+                const fs::path name = file.lexically_relative(origin);
+                if (name.empty() || name.is_absolute()) {
+                    continue;
+                }
+                for (const auto& directory : projectDirectories) {
+                    if (const fs::path candidate = (directory / name).lexically_normal(); candidate != file) {
+                        candidates.insert(candidate.generic_string());
+                    }
+                }
+            }
+        }
+    }
+    return {candidates.begin(), candidates.end()};
+}
+
 // Relocation: under a base directory, absolute paths are replaced with paths relative to the working
 // directory, so that the same project checked out elsewhere, or on another machine, produces the
 // same keys. This is ccache's `base_dir`.
@@ -632,17 +858,8 @@ std::optional<std::string> relocatablePath(std::string_view path, const fs::path
     if (base.empty() || path.empty()) {
         return std::nullopt;
     }
-    // Windows file names are not case-sensitive, and MSVC reports included files in lower case.
     const auto fold = [](const fs::path& original) {
-#ifdef _WIN32
-        std::string text = original.lexically_normal().generic_string();
-        std::ranges::transform(text, text.begin(), [](char c) {
-            return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
-        });
-        return fs::path{text};
-#else
-        return original.lexically_normal();
-#endif
+        return comparablePath(original);
     };
     const fs::path candidate{path};
     if (!candidate.is_absolute()) {
