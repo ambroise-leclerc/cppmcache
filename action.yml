@@ -87,10 +87,12 @@ runs:
 
         # The archive must be the one the release workflow published.
         expected="$(sed -n "s/^\([0-9a-f]\{64\}\)  ${name}\.${archive}\$/\1/p" "${download}/SHA256SUMS")"
+        # The file is read from standard input: given a Windows path, with its backslashes,
+        # sha256sum prefixes the digest with a backslash to say that it escaped the file name.
         if command -v sha256sum > /dev/null; then
-          actual="$(sha256sum "${download}/${name}.${archive}" | cut -d' ' -f1)"
+          actual="$(sha256sum < "${download}/${name}.${archive}" | cut -d' ' -f1)"
         else
-          actual="$(shasum -a 256 "${download}/${name}.${archive}" | cut -d' ' -f1)"
+          actual="$(shasum -a 256 < "${download}/${name}.${archive}" | cut -d' ' -f1)"
         fi
         if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
           echo "::error::Checksum mismatch for ${name}.${archive}: expected '${expected}', got '${actual}'."

@@ -330,8 +330,14 @@ jobs:
   # The repository is also the action that installs a released cppmcache. It is exercised here
   # against the latest release, once there is one.
   setup-action:
-    name: Setup action
-    runs-on: ubuntu-24.04
+    name: Setup action on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # One runner per published binary: the action's shell code meets a different environment
+        # on each, and a Windows path broke its checksum comparison once.
+        os: [ubuntu-24.04, macos-15, windows-2025]
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -340,6 +346,7 @@ jobs:
 
       - name: Look for a release
         id: release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -357,11 +364,56 @@ jobs:
         with:
           cache: "false"
 
-      - name: Compile a modules project through the installed binary
+      # In the default shell of each runner, which is PowerShell on Windows: the executable must be
+      # found on the PATH there too, and the variables the action exports must be set.
+      - name: Run the installed binary
         if: steps.release.outputs.exists == 'true'
         run: |
+          cppmcache --version
+          cppmcache -s
+
+      - name: Check what the action set
+        if: steps.release.outputs.exists == 'true'
+        shell: bash
+        env:
+          INSTALLED_PATH: ${{ steps.setup.outputs.path }}
+          INSTALLED_VERSION: ${{ steps.setup.outputs.version }}
+        run: |
           set -euo pipefail
-          test "$(command -v cppmcache)" = "${{ steps.setup.outputs.path }}"
-          test -n "$CPPMCACHE_BASEDIR" && test "$CPPMCACHE_COMPILERCHECK" = "content"
+          test -n "$INSTALLED_VERSION"
+          test -f "$INSTALLED_PATH"
+          test -d "$CPPMCACHE_DIR"
+          test -n "$CPPMCACHE_BASEDIR"
+          test "$CPPMCACHE_COMPILERCHECK" = "content"
+          test "$("$INSTALLED_PATH" --version)" = "cppmcache version ${INSTALLED_VERSION}"
+
+      # Only this image has, preinstalled, a compiler that knows the module options the test uses.
+      - name: Compile a modules project through the installed binary
+        if: steps.release.outputs.exists == 'true' && matrix.os == 'ubuntu-24.04'
+        run: |
           cmake -DCPPMCACHE="$(command -v cppmcache)" -DCOMPILER="$(command -v clang++-18)" -DFAMILY=clang -DVARIANT=cmake \
+            -DWORK_DIR="${RUNNER_TEMP}/action-smoke" -P tests/integration/Modules.cmake
+
+  # The same action inside a container job, as a project that builds in a compiler image uses it.
+  setup-action-container:
+    name: Setup action in a container
+    runs-on: ubuntu-latest
+    container: gcc:16.1.0
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cppmcache with the action
+        id: setup
+        uses: ./
+        with:
+          cache: "false"
+
+      - name: Compile a modules project through the installed binary
+        run: |
+          apt-get update && apt-get install -y cmake
+          cppmcache --version
+          cmake -DCPPMCACHE="$(command -v cppmcache)" -DCOMPILER="$(command -v g++)" -DFAMILY=gcc -DVARIANT=cmake \
             -DWORK_DIR="${RUNNER_TEMP}/action-smoke" -P tests/integration/Modules.cmake
