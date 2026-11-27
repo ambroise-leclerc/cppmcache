@@ -37,12 +37,15 @@ earlier in the search order, `#include <vulkan/vulkan.h>` finds the new file alt
 the previous compilation read is unchanged. Checking the recorded files alone would serve the old
 object. ccache's direct mode has this limit; cppmcache checks for it.
 
-- **The search path.** GCC and Clang are asked for it, with `-v`, once per compiler and set of
-  options; the answer is memoised. For MSVC it is the `/I` directories followed by `INCLUDE`.
+- **The search path.** GCC and Clang are asked for it, with `-v`; the answer is memoised per
+  compiler, options and existence of the specified include directories. A directory created later
+  therefore prompts a fresh query, since the compiler omits absent directories from its report.
+  For MSVC the search path is the `/I` directories followed by `INCLUDE`.
 - **The candidates.** For each recorded header and each search directory that contains it, the
   name it was presumably included by is its path relative to that directory. The same name in any
   directory searched earlier, or beside a file of the project, which is where a quoted include
-  looks first, is a place where a shadowing header would be.
+  looks first, is a place where a shadowing header would be. Project directories include those
+  supplied through the compiler's include-path environment variables.
 - **The check.** A manifest entry records which of those places were already occupied when it was
   made: they did not win then. On lookup, a file in any other of those places invalidates the
   entry, and the unit is compiled again.

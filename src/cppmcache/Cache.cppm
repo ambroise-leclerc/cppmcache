@@ -130,7 +130,7 @@ std::vector<ManifestEntry> decodeManifest(std::string_view encoded) {
 
 namespace cppmcache {
 
-constexpr std::string_view formatVersion      = "4";
+constexpr std::string_view formatVersion      = "5";
 constexpr std::size_t      maxManifestEntries = 32;
 
 // Environment variables that influence the compiler's output.
@@ -345,6 +345,29 @@ std::optional<std::string> remoteManifest(Context& context) {
     return std::nullopt;
 }
 
+// Directories supplied by the environment are project directories too. An empty component denotes
+// the working directory, as it does for GCC and Clang.
+std::vector<std::string> environmentIncludeDirectories() {
+    std::vector<std::string> directories;
+#ifdef _WIN32
+    constexpr char separator = ';';
+#else
+    constexpr char separator = ':';
+#endif
+    for (const char* name : {"CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH"}) {
+        if (const auto value = environment(name)) {
+            if (value->empty()) {
+                directories.emplace_back(".");
+                continue;
+            }
+            for (const auto part : std::views::split(std::string_view{*value}, separator)) {
+                directories.emplace_back(part.empty() ? "." : std::string{part.begin(), part.end()});
+            }
+        }
+    }
+    return directories;
+}
+
 // Finds out where the compiler looks for included files. GCC and Clang are asked, with -v, and the
 // answer is memoised for the compiler and the options; MSVC's search path follows from the command.
 bool ensureSearchPath(Context& context) {
@@ -370,6 +393,20 @@ bool ensureSearchPath(Context& context) {
     // All of the probe but its last argument, the temporary file, whose name is random.
     for (const auto& argument : std::span{probe}.first(probe.size() - 1)) {
         key.field(argument);
+    }
+    // GCC and Clang omit directories that do not exist from their report. Re-probe when one is
+    // created or removed, including when the same command is used from another working directory.
+    auto directories = context.invocation.includeDirectories;
+    std::ranges::copy(environmentIncludeDirectories(), std::back_inserter(directories));
+    for (const auto& directory : directories) {
+        const fs::path  path = absoluteNormal(context.cwd, directory);
+        std::error_code error;
+        const bool      exists = fs::is_directory(path, error);
+        if (error && error != std::errc::no_such_file_or_directory && error != std::errc::not_a_directory) {
+            context.log("error", "cannot inspect an include directory");
+            return false;
+        }
+        key.field(path.generic_string()).field(exists ? "present" : "absent");
     }
     const std::string memoKey = key.finishHex();
     if (const auto memo = store.searchPathGet(memoKey)) {
@@ -414,8 +451,11 @@ std::optional<std::vector<std::string>> presentShadows(Context& context, const M
     }
     std::vector<std::string> present;
     std::error_code          error;
-    for (const auto& candidate :
-         shadowCandidates(*context.searchPath, context.invocation.includeDirectories, context.cwd, context.invocation.source, headers)) {
+    auto                     userDirectories = context.invocation.includeDirectories;
+    if (context.kind != CompilerKind::msvc) {
+        std::ranges::copy(environmentIncludeDirectories(), std::back_inserter(userDirectories));
+    }
+    for (const auto& candidate : shadowCandidates(*context.searchPath, userDirectories, context.cwd, context.invocation.source, headers)) {
         if (fs::exists(candidate, error)) {
             present.push_back(context.storedPath(candidate));
         }
