@@ -29,3 +29,24 @@ The inputs of a compilation are discovered after the fact, from the dependency f
 from the module mapping (`-fmodule-mapper=` for GCC, `-fmodule-file=name=path` for Clang). For MSVC
 they come from the JSON report of `/sourceDependencies`, which cppmcache adds to the command, and
 from the `/reference name=path` options. There is no preprocessor pass.
+
+## Header shadowing
+
+Learning the inputs from what the compiler read has a blind spot. If a header is created later,
+earlier in the search order, `#include <vulkan/vulkan.h>` finds the new file although every file
+the previous compilation read is unchanged. Checking the recorded files alone would serve the old
+object. ccache's direct mode has this limit; cppmcache checks for it.
+
+- **The search path.** GCC and Clang are asked for it, with `-v`, once per compiler and set of
+  options; the answer is memoised. For MSVC it is the `/I` directories followed by `INCLUDE`.
+- **The candidates.** For each recorded header and each search directory that contains it, the
+  name it was presumably included by is its path relative to that directory. The same name in any
+  directory searched earlier, or beside a file of the project, which is where a quoted include
+  looks first, is a place where a shadowing header would be.
+- **The check.** A manifest entry records which of those places were already occupied when it was
+  made: they did not win then. On lookup, a file in any other of those places invalidates the
+  entry, and the unit is compiled again.
+
+The name an include directive used is not known, so every directory containing the header gives a
+hypothesis; the check is conservative. If the compiler does not report its search path, the result
+of a compilation is not stored at all: an entry that cannot be checked must not exist.

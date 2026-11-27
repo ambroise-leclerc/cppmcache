@@ -38,6 +38,9 @@ struct ManifestEntry {
     std::vector<Dependency>  dependencies;
     std::vector<Import>      imports;
     std::vector<std::string> provides;
+    // Files that existed, when the entry was made, where a header shadowing one of the dependencies
+    // would be: they did not win then. Any other file found in such a place invalidates the entry.
+    std::vector<std::string> knownShadows;
 
     friend bool operator==(const ManifestEntry&, const ManifestEntry&) = default;
 };
@@ -62,6 +65,9 @@ std::string encodeManifest(const std::vector<ManifestEntry>& entries) {
         for (const auto& name : entry.provides) {
             writer.message(3, name);
         }
+        for (const auto& path : entry.knownShadows) {
+            writer.message(4, path);
+        }
         manifest.message(1, writer.take());
     }
     return manifest.take();
@@ -83,6 +89,10 @@ std::vector<ManifestEntry> decodeManifest(std::string_view encoded) {
             }
             if (field->number == 3) {
                 entry.provides.emplace_back(field->data);
+                continue;
+            }
+            if (field->number == 4) {
+                entry.knownShadows.emplace_back(field->data);
                 continue;
             }
             std::string text;
@@ -120,7 +130,7 @@ std::vector<ManifestEntry> decodeManifest(std::string_view encoded) {
 
 namespace cppmcache {
 
-constexpr std::string_view formatVersion      = "3";
+constexpr std::string_view formatVersion      = "4";
 constexpr std::size_t      maxManifestEntries = 32;
 
 // Environment variables that influence the compiler's output.
@@ -169,21 +179,23 @@ void writeText(const fs::path& path, std::string_view text) {
 
 // Everything that is common to lookup and storage for a given call.
 struct Context {
-    Store&                   store;
-    const Config&            config;
-    fs::path                 cwd;
-    CompilerKind             kind   = CompilerKind::unknown;
-    RemoteCache*             remote = nullptr;  // remote cache, when one is configured and usable
-    fs::path                 baseDirectory{};   // relocation base, empty when relocation is off
-    std::vector<std::string> compileCommand{};  // the command to run on a miss
-    Invocation               invocation{};
-    ModuleMap                modules{};
-    fs::path                 sourceAbsolute{};
-    Digest                   sourceDigest{};
-    Command                  command{};
-    Digest                   commandDigest{};
-    std::vector<NameValue>   platform{};
-    std::string              manifestKey{};
+    Store&                    store;
+    const Config&             config;
+    fs::path                  cwd;
+    CompilerKind              kind   = CompilerKind::unknown;
+    RemoteCache*              remote = nullptr;  // remote cache, when one is configured and usable
+    std::optional<SearchPath> searchPath{};      // include search path of the command, once asked for
+    bool                      searchPathAsked = false;
+    fs::path                  baseDirectory{};   // relocation base, empty when relocation is off
+    std::vector<std::string>  compileCommand{};  // the command to run on a miss
+    Invocation                invocation{};
+    ModuleMap                 modules{};
+    fs::path                  sourceAbsolute{};
+    Digest                    sourceDigest{};
+    Command                   command{};
+    Digest                    commandDigest{};
+    std::vector<NameValue>    platform{};
+    std::string               manifestKey{};
 
     void log(std::string_view outcome, std::string_view detail = {}) const {
         if (config.log.empty()) {
@@ -333,6 +345,85 @@ std::optional<std::string> remoteManifest(Context& context) {
     return std::nullopt;
 }
 
+// Finds out where the compiler looks for included files. GCC and Clang are asked, with -v, and the
+// answer is memoised for the compiler and the options; MSVC's search path follows from the command.
+bool ensureSearchPath(Context& context) {
+    if (context.searchPathAsked) {
+        return context.searchPath.has_value();
+    }
+    context.searchPathAsked = true;
+    if (context.kind == CompilerKind::msvc) {
+        context.searchPath = msvcSearchPath(context.invocation.includeDirectories, environment("INCLUDE").value_or(""));
+        return true;
+    }
+    Store&                         store       = context.store;
+    const fs::path                 emptySource = store.temporaryFile(".cpp");
+    const std::vector<std::string> probe       = searchPathProbe(context.invocation, emptySource.string());
+    KeyHasher                      key;
+    key.field("cppmcache-search-path");
+    for (const auto& [name, value] : context.platform) {
+        key.field(name).field(value);
+    }
+    for (const auto& [name, value] : context.command.environment) {
+        key.field(name).field(value);
+    }
+    // All of the probe but its last argument, the temporary file, whose name is random.
+    for (const auto& argument : std::span{probe}.first(probe.size() - 1)) {
+        key.field(argument);
+    }
+    const std::string memoKey = key.finishHex();
+    if (const auto memo = store.searchPathGet(memoKey)) {
+        context.searchPath = parseSearchPath(*memo);
+        if (context.searchPath) {
+            return true;
+        }
+    }
+    const fs::path capturedOutput = store.temporaryFile(".out");
+    const fs::path capturedError  = store.temporaryFile(".err");
+    writeText(emptySource, "");
+    std::vector<std::string> commandLine{context.compileCommand.front()};
+    std::ranges::copy(probe, std::back_inserter(commandLine));
+    executeCaptured(commandLine, capturedOutput, capturedError);
+    const std::string verbose = readFile(capturedError).value_or("");
+    std::error_code   error;
+    for (const auto& file : {emptySource, capturedOutput, capturedError}) {
+        fs::remove(file, error);
+    }
+    context.searchPath = parseSearchPath(verbose);
+    if (context.searchPath) {
+        store.searchPathPut(memoKey, verbose);
+        return true;
+    }
+    context.log("error", "the compiler did not report its include search path");
+    return false;
+}
+
+// The files that exist now where a header shadowing one of the entry's dependencies would be, in
+// the form a manifest records them. Nothing if the search path of the compiler is unknown.
+std::optional<std::vector<std::string>> presentShadows(Context& context, const ManifestEntry& entry) {
+    if (!ensureSearchPath(context)) {
+        return std::nullopt;
+    }
+    std::vector<std::string> headers;
+    for (const auto& dependency : entry.dependencies) {
+        const std::string extension = fs::path{dependency.path}.extension().string();
+        // An indirectly imported BMI is recorded as a dependency; nothing shadows it.
+        if (extension != ".gcm" && extension != ".bmi" && extension != ".pcm" && extension != ".ifc") {
+            headers.push_back(dependency.path);
+        }
+    }
+    std::vector<std::string> present;
+    std::error_code          error;
+    for (const auto& candidate :
+         shadowCandidates(*context.searchPath, context.invocation.includeDirectories, context.cwd, context.invocation.source, headers)) {
+        if (fs::exists(candidate, error)) {
+            present.push_back(context.storedPath(candidate));
+        }
+    }
+    std::ranges::sort(present);
+    return present;
+}
+
 // Whether a manifest entry describes the current state of the files.
 bool entryMatches(Context& context, const ManifestEntry& entry) {
     for (const auto& dependency : entry.dependencies) {
@@ -348,9 +439,17 @@ bool entryMatches(Context& context, const ManifestEntry& entry) {
             return false;
         }
     }
-    return std::ranges::all_of(entry.provides, [&](const std::string& name) {
-        return context.modules.files.contains(name);
-    });
+    if (!std::ranges::all_of(entry.provides, [&](const std::string& name) {
+            return context.modules.files.contains(name);
+        })) {
+        return false;
+    }
+    // Every recorded file is unchanged. A header created since, earlier in the search order, would
+    // still change what the compiler reads: the entry is only valid if no such file has appeared.
+    const auto present = presentShadows(context, entry);
+    return present && std::ranges::all_of(*present, [&](const std::string& path) {
+               return std::ranges::contains(entry.knownShadows, path);
+           });
 }
 
 // Restores the outputs recorded for a matching entry. What the local store lacks is fetched from
@@ -647,6 +746,14 @@ int compileAndStore(Context& context) {
     if (fs::last_write_time(context.sourceAbsolute, error) >= started) {
         return uncacheable("source modified during the compilation");
     }
+    // What already sits where a shadowing header would be did not win this compilation. Without
+    // the compiler's search path that cannot be told, and the result is not stored: an entry that
+    // cannot be checked against a new header must not exist.
+    const auto shadows = presentShadows(context, entry);
+    if (!shadows) {
+        return uncacheable("include search path unknown");
+    }
+    entry.knownShadows = *shadows;
 
     // Outputs: the object and the BMIs provided.
     ActionResult result;

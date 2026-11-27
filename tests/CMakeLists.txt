@@ -23,6 +23,7 @@ add_executable(cppmcache_spec
     spec/MsvcSpec.cpp
     spec/HttpSpec.cpp
     spec/RelocationSpec.cpp
+    spec/ShadowSpec.cpp
     spec/StoreSpec.cpp)
 target_link_libraries(cppmcache_spec PRIVATE cppmcache_core speclab::speclab)
 cppmcache_configure_target(cppmcache_spec)
@@ -110,6 +111,16 @@ add_test(NAME integration.relocation
         -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/integration-relocation
         -P ${CMAKE_CURRENT_SOURCE_DIR}/integration/Relocate.cmake)
 set_tests_properties(integration.relocation PROPERTIES LABELS "integration;relocation")
+
+# Header shadowing: a file created earlier in the search order must force a recompilation.
+add_test(NAME integration.shadow
+    COMMAND ${CMAKE_COMMAND}
+        -DCPPMCACHE=$<TARGET_FILE:cppmcache>
+        -DCOMPILER=${CMAKE_CXX_COMPILER}
+        -DFAMILY=${relocation_family}
+        -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/integration-shadow
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/integration/Shadow.cmake)
+set_tests_properties(integration.shadow PROPERTIES LABELS "integration;shadow")
 
 # A toolchain file given as a relative path is resolved here, as CMake resolved it: the nested
 # build is configured from another directory.

@@ -10,7 +10,7 @@ branding:
 
 inputs:
   version:
-    description: Version to install, such as 0.1.0, or "latest".
+    description: Version to install, such as 0.1.1, or "latest".
     default: latest
   cache:
     description: Keep the cache directory between workflow runs with actions/cache ("true" or "false").

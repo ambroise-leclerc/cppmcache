@@ -49,7 +49,7 @@ are in [docs/measurements.md](docs/measurements.md).
 **In GitHub Actions**, with a released binary and the cache kept between runs:
 
 ```yaml
-- uses: ambroise-leclerc/cppmcache@v0.1.0
+- uses: ambroise-leclerc/cppmcache@v0.1.1
 - run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER_LAUNCHER=cppmcache
 - run: cmake --build build
 - run: cppmcache -s
@@ -119,6 +119,9 @@ in [docs/usage.md](docs/usage.md).
   that out of the digest, so identical interfaces compare equal.
 - **No preprocessor pass.** Inputs are read from what the compiler reports: the dependency file and
   module mapping for GCC and Clang, `/sourceDependencies` for MSVC.
+- **Header shadowing is detected.** A header created earlier in the search order than one a unit
+  included changes what the compiler reads without changing any file it read. cppmcache checks the
+  places where such a file would be, and recompiles.
 
 The full description is in [docs/design.md](docs/design.md).
 
