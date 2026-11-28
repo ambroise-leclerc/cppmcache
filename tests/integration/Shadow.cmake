@@ -275,13 +275,14 @@ if(NOT FAMILY STREQUAL "msvc")
     build(hit 2)
 
     message(STATUS "17. a system header tests a name beside itself, a directory no -I names")
-    # A sysroot makes the directory a system one. <cstdio> is not under it, so printf is declared.
+    # -iwithprefixbefore adds a search directory that no -I names, as a system directory is. On
+    # macOS, --sysroot would not add it. printf is declared, so nothing else is needed from it.
     file(MAKE_DIRECTORY "${WORK_DIR}/sysroot/usr/include/vendor")
     file(WRITE "${WORK_DIR}/sysroot/usr/include/vendor/probe.h"
         "#if ${has_include}(\"flag.h\")\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n")
     file(WRITE "${WORK_DIR}/src/system.cpp"
         "extern \"C\" int printf(const char*, ...);\n#include <vendor/probe.h>\nint main() { printf(\"%d\\n\", VALUE); }\n")
-    set(compile -std=c++23 --sysroot=sysroot -MD -MF out/main.o.d -o out/main.o -c src/system.cpp)
+    set(compile -std=c++23 -iprefix sysroot/ -iwithprefixbefore usr/include -MD -MF out/main.o.d -o out/main.o -c src/system.cpp)
     build(miss 1)
     build(hit 1)
     file(WRITE "${WORK_DIR}/sysroot/usr/include/vendor/flag.h" "")
@@ -297,7 +298,7 @@ if(NOT FAMILY STREQUAL "msvc")
         "#include <vendor/define.h>\n#if HAS_FLAG\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n")
     file(WRITE "${WORK_DIR}/src/expand.cpp"
         "extern \"C\" int printf(const char*, ...);\n#include <vendor/expand/use.h>\nint main() { printf(\"%d\\n\", VALUE); }\n")
-    set(compile -std=c++23 --sysroot=sysroot -MD -MF out/main.o.d -o out/main.o -c src/expand.cpp)
+    set(compile -std=c++23 -iprefix sysroot/ -iwithprefixbefore usr/include -MD -MF out/main.o.d -o out/main.o -c src/expand.cpp)
     build(miss 1)
     build(hit 1)
     file(WRITE "${WORK_DIR}/sysroot/usr/include/vendor/expand/flag.h" "")

@@ -69,7 +69,8 @@ struct Invocation {
 // trigraphs, would read the file differently from the compiler. The standard modes of GCC and Clang
 // before C++17, and every standard C mode, replace them.
 bool enablesTrigraphs(std::string_view argument) {
-    if (argument == "-trigraphs" || argument == "-ftrigraphs" || argument == "-ansi" || argument == "/Zc:trigraphs" || argument == "-Zc:trigraphs") {
+    if (argument == "-trigraphs" || argument == "--trigraphs" || argument == "-ftrigraphs" || argument == "-ansi" || argument == "/Zc:trigraphs"
+        || argument == "-Zc:trigraphs") {
         return true;
     }
     for (const std::string_view prefix : {"-std=", "--std="}) {
@@ -86,41 +87,23 @@ bool enablesTrigraphs(std::string_view argument) {
 Invocation parseCommand(CompilerKind kind, const std::vector<std::string>& arguments) {
     const bool                              gcc   = kind == CompilerKind::gcc;
     const bool                              clang = kind == CompilerKind::clang;
-    static const std::set<std::string_view> separateValue{"-I",
-                                                          "-D",
-                                                          "-U",
-                                                          "-include",
-                                                          "-isystem",
-                                                          "-iquote",
-                                                          "-idirafter",
-                                                          "-imacros",
-                                                          "-isysroot",
-                                                          "-iprefix",
-                                                          "-iwithprefix",
-                                                          "-iwithprefixbefore",
-                                                          "-imultilib",
-                                                          "-x",
-                                                          "--param",
-                                                          "-B",
-                                                          "-L",
-                                                          "-l",
-                                                          "-u",
-                                                          "-T",
-                                                          "-Xpreprocessor",
-                                                          "-Xassembler",
-                                                          "-Xlinker",
-                                                          "-A",
-                                                          "-G",
-                                                          "-aux-info",
-                                                          "-z",
-                                                          "-e",
-                                                          "-target",
-                                                          "-arch",
-                                                          "-isystem-after",
-                                                          "-iframework",
-                                                          "-F",
-                                                          "--sysroot",
-                                                          "-gcc-toolchain",
+    static const std::set<std::string_view> separateValue{"-I",           "-D",
+                                                          "-U",           "-include",
+                                                          "-isystem",     "-iquote",
+                                                          "-idirafter",   "-imacros",
+                                                          "-isysroot",    "-iprefix",
+                                                          "-iwithprefix", "-iwithprefixbefore",
+                                                          "-imultilib",   "-x",
+                                                          "--param",      "-B",
+                                                          "-L",           "-l",
+                                                          "-u",           "-T",
+                                                          "-Xassembler",  "-Xlinker",
+                                                          "-A",           "-G",
+                                                          "-aux-info",    "-z",
+                                                          "-e",           "-target",
+                                                          "-arch",        "-isystem-after",
+                                                          "-iframework",  "-F",
+                                                          "--sysroot",    "-gcc-toolchain",
                                                           "-mllvm"};
     // Clang-specific options that fall outside the model: implicit modules, additional outputs.
     static const std::set<std::string_view>       clangBypassExact{"-fmodules",
@@ -220,6 +203,25 @@ Invocation parseCommand(CompilerKind kind, const std::vector<std::string>& argum
         }
         if (enablesTrigraphs(argument)) {
             bypass(std::format("trigraphs enabled by {}", argument));
+            continue;
+        }
+        // An option handed to the preprocessor unseen could define a macro or turn trigraphs on
+        // where the scan of __has_include tests would not know it.
+        if (argument == "-Xpreprocessor") {
+            bypass("option forwarded with -Xpreprocessor");
+            continue;
+        }
+        if (argument == "--define-macro" || argument.starts_with("--define-macro=")) {
+            if (argument == "--define-macro") {
+                invocation.keyArguments.push_back(argument);
+                if (i + 1 < arguments.size()) {
+                    invocation.macroDefinitions.push_back(arguments[i + 1]);
+                    invocation.keyArguments.push_back(arguments[++i]);
+                }
+            } else {
+                invocation.macroDefinitions.push_back(argument.substr(std::string_view{"--define-macro="}.size()));
+                invocation.keyArguments.push_back(argument);
+            }
             continue;
         }
         if (bypassExact.contains(argument)) {
