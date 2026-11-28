@@ -132,7 +132,9 @@ std::vector<ManifestEntry> decodeManifest(std::string_view encoded) {
 
 namespace cppmcache {
 
-constexpr std::string_view formatVersion      = "6";
+// "7": entries made before tested headers were recorded among the known shadows would match
+// without them once such a header is removed, and are not read.
+constexpr std::string_view formatVersion      = "7";
 constexpr std::size_t      maxManifestEntries = 32;
 
 // Environment variables that influence the compiler's output.
@@ -495,9 +497,9 @@ std::optional<std::vector<std::string>> presentShadows(Context& context, const M
         scanned.push_back(absoluteNormal(context.cwd, header));
     }
     std::vector<std::string> probedNames;
-    std::vector<std::string> probingFiles;  // the files that test a header, beside which their tests look
-    std::string              joins;         // a file that pastes a macro argument into something that can spell the operator
-    std::vector<std::string> pieces;        // the parts of the operator's name written where a paste could use them
+    std::vector<std::string> quotedNames;  // the names tested in quotes, which look beside the expanding file first
+    std::string              joins;        // a file that pastes a macro argument into something that can spell the operator
+    std::vector<std::string> pieces;       // the parts of the operator's name written where a paste could use them
     const auto               merge = [&](const std::vector<std::string>& names) {
         for (const auto& name : names) {
             if (!std::ranges::contains(probedNames, name)) {
@@ -514,8 +516,10 @@ std::optional<std::vector<std::string>> presentShadows(Context& context, const M
             return refuse(std::format("__has_include with a computed operand in {}", file.generic_string()));
         }
         merge(info->probedHeaders);
-        if (!info->probedHeaders.empty()) {
-            probingFiles.push_back(file.string());
+        for (const auto& name : info->quotedProbes) {
+            if (!std::ranges::contains(quotedNames, name)) {
+                quotedNames.push_back(name);
+            }
         }
         if (joins.empty() && info->pasteJoin) {
             joins = file.generic_string();
@@ -539,6 +543,11 @@ std::optional<std::vector<std::string>> presentShadows(Context& context, const M
             return refuse(std::format("__has_include with a computed operand in the definition of {}", definition));
         }
         merge(probes.names);
+        for (const auto& name : probes.quoted) {
+            if (!std::ranges::contains(quotedNames, name)) {
+                quotedNames.push_back(name);
+            }
+        }
         if (joins.empty() && probes.joins) {
             joins = std::format("-D{}", definition);
         }
@@ -560,7 +569,7 @@ std::optional<std::vector<std::string>> presentShadows(Context& context, const M
         std::ranges::copy(environmentIncludeDirectories(), std::back_inserter(userDirectories));
     }
     for (const auto& candidate :
-         shadowCandidates(*context.searchPath, userDirectories, context.cwd, context.invocation.source, headers, probedNames, probingFiles)) {
+         shadowCandidates(*context.searchPath, userDirectories, context.cwd, context.invocation.source, headers, probedNames, quotedNames)) {
         const bool regular = fs::is_regular_file(candidate, error);
         if (error && error != std::errc::no_such_file_or_directory && error != std::errc::not_a_directory) {
             context.log("error", "cannot inspect a shadow candidate");

@@ -799,8 +799,8 @@ std::vector<std::string> shadowCandidates(const SearchPath&               search
                                           const fs::path&                 cwd,
                                           const std::string&              source,
                                           const std::vector<std::string>& dependencies,
-                                          const std::vector<std::string>& probedNames  = {},
-                                          const std::vector<std::string>& probingFiles = {}) {
+                                          const std::vector<std::string>& probedNames = {},
+                                          const std::vector<std::string>& quotedNames = {}) {
     // Every path is made comparable first: on Windows the compiler's report and the command line
     // do not spell a directory the same way.
     const auto absolute = [&](const std::string& path) {
@@ -890,13 +890,21 @@ std::vector<std::string> shadowCandidates(const SearchPath&               search
             }
         }
     }
-    // A quoted test looks beside the file that makes it first, and MSVC also beside each file that
-    // includes it, toolchain headers as much as project ones: every directory of a file that tests
-    // something is watched for every name tested.
-    std::vector<fs::path> probingDirectories;
-    for (const auto& file : probingFiles) {
-        if (const fs::path directory = absolute(file).parent_path(); !std::ranges::contains(probingDirectories, directory)) {
-            probingDirectories.push_back(directory);
+    // A quoted test looks first beside the file where it is evaluated, which a macro defined
+    // elsewhere can make any file read, and MSVC also beside each file that includes that one,
+    // toolchain headers as much as project ones: a name tested in quotes is watched beside the
+    // source and every recorded header.
+    std::vector<fs::path> readDirectories{absolute(source).parent_path()};
+    for (const auto& file : files) {
+        if (!std::ranges::contains(readDirectories, file.parent_path())) {
+            readDirectories.push_back(file.parent_path());
+        }
+    }
+    for (const auto& quoted : quotedNames) {
+        if (const fs::path name{quoted}; !name.is_absolute()) {
+            for (const auto& directory : readDirectories) {
+                candidates.insert(comparablePath(directory / name).generic_string());
+            }
         }
     }
     for (const auto& probed : probedNames) {
@@ -905,7 +913,7 @@ std::vector<std::string> shadowCandidates(const SearchPath&               search
             candidates.insert(comparablePath(name).generic_string());
             continue;
         }
-        for (const auto& directories : {std::cref(ordered), std::cref(projectDirectories), std::cref(probingDirectories)}) {
+        for (const auto& directories : {std::cref(ordered), std::cref(projectDirectories)}) {
             for (const auto& directory : directories.get()) {
                 candidates.insert(comparablePath(directory / name).generic_string());
             }

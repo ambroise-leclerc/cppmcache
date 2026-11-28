@@ -50,9 +50,11 @@ object. ccache's direct mode has this limit; cppmcache checks for it.
 - **Tested headers.** A header that `__has_include` or `__has_include_next` looks for changes the
   result whether it exists or not, and need not be read: no recorded file points to it. The source
   and every recorded header are therefore scanned for those tests, and each name they give is a
-  candidate in every search and project directory, whichever form it was written in, and beside
-  every file that makes a test, a system header as much as a project one, since a quoted test looks
-  there first. The scan works on preprocessing tokens, as the compiler forms them: lines are spliced
+  candidate in every search and project directory, whichever form it was written in. A name tested
+  in quotes is also a candidate beside the source and every recorded header, system headers
+  included: a quoted test looks first beside the file where it is evaluated, which a macro defined
+  in one header can make any other. Entries made before tested headers were recorded are not read
+  (format version 7). The scan works on preprocessing tokens, as the compiler forms them: lines are spliced
   first, a comment is a space,
   a string or character literal is one token, and so is a header name after `#include` or
   `__has_include(`, where `//` and `/*` are characters of the name. An unterminated comment or raw

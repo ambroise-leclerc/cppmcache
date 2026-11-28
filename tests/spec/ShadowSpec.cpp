@@ -286,13 +286,17 @@ const speclab::Register probedBesideTester{
     "unit,shadow",
     [] {
         return speclab::Test("SHADOW-011")
-            .Then("the name is also a candidate beside the file that tests it, which no search directory is",
+            .Then("a name tested in quotes is also a candidate beside every file read, where a macro could expand the test",
                   [] {
                       const SearchPath path{{}, {sdk}};
-                      const Paths      candidates = shadowCandidates(path, {}, cwd, "../src/m.cpp", {sdk + "/sub/a.h"}, {"flag.h"}, {sdk + "/sub/a.h"});
-                      Checks           checks;
-                      checks.expect(contains(candidates, sdk + "/sub/flag.h"), "beside the testing header");
+                      const Paths      candidates =
+                          shadowCandidates(path, {}, cwd, "../src/m.cpp", {sdk + "/sub/a.h", sdk + "/other/b.h"}, {"flag.h", "angle.h"}, {"flag.h"});
+                      Checks checks;
+                      checks.expect(contains(candidates, sdk + "/sub/flag.h"), "beside the header that defines the test");
+                      checks.expect(contains(candidates, sdk + "/other/flag.h"), "beside another header that could expand it");
+                      checks.expect(contains(candidates, root + "/src/flag.h"), "beside the source");
                       checks.expect(contains(candidates, sdk + "/flag.h"), "in the search directory");
+                      checks.expect(!contains(candidates, sdk + "/other/angle.h"), "a name tested in angle brackets does not look beside a file");
                       checks.raise();
                   })
             .Execute();

@@ -290,6 +290,22 @@ if(NOT FAMILY STREQUAL "msvc")
     file(REMOVE "${WORK_DIR}/sysroot/usr/include/vendor/flag.h")
     build(hit 1)
 
+    message(STATUS "19. a quoted test in a macro looks beside the header that expands it")
+    file(MAKE_DIRECTORY "${WORK_DIR}/sysroot/usr/include/vendor/expand")
+    file(WRITE "${WORK_DIR}/sysroot/usr/include/vendor/define.h" "#define HAS_FLAG ${has_include}(\"flag.h\")\n")
+    file(WRITE "${WORK_DIR}/sysroot/usr/include/vendor/expand/use.h"
+        "#include <vendor/define.h>\n#if HAS_FLAG\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n")
+    file(WRITE "${WORK_DIR}/src/expand.cpp"
+        "extern \"C\" int printf(const char*, ...);\n#include <vendor/expand/use.h>\nint main() { printf(\"%d\\n\", VALUE); }\n")
+    set(compile -std=c++23 --sysroot=sysroot -MD -MF out/main.o.d -o out/main.o -c src/expand.cpp)
+    build(miss 1)
+    build(hit 1)
+    file(WRITE "${WORK_DIR}/sysroot/usr/include/vendor/expand/flag.h" "")
+    build(miss 2)
+    build(hit 2)
+    file(REMOVE "${WORK_DIR}/sysroot/usr/include/vendor/expand/flag.h")
+    build(hit 1)
+
     message(STATUS "18. trigraphs replaced before lines are spliced: nothing is stored")
     string(REPLACE "include" "??/\ninclude" trigraph "${has_include}")
     file(WRITE "${WORK_DIR}/src/trigraph.cpp"

@@ -114,6 +114,9 @@ struct FileInfo {
     // written between the quotes or angle brackets. A header that is absent leaves no trace among
     // the files a compilation read, so these names are what tells the cache where one could appear.
     std::vector<std::string> probedHeaders;
+    // Those of them tested in quotes: such a test looks first beside the file where it is expanded,
+    // which a macro can make another file than this one.
+    std::vector<std::string> quotedProbes;
     // One of those tests names its header through a macro, so where it looks cannot be known.
     bool computedProbe = false;
     // Token pasting can build the operator's name out of tokens that may come from different files.
@@ -126,6 +129,7 @@ struct FileInfo {
 // What `scanHeaderProbes` finds in a file.
 struct HeaderProbes {
     std::vector<std::string> names;
+    std::vector<std::string> quoted;  // those of `names` tested in quotes, which look beside a file first
     bool                     computed = false;
     bool                     joins    = false;
     std::vector<std::string> pieces;
@@ -355,6 +359,9 @@ HeaderProbes scanHeaderProbes(std::string_view raw) {
                 if (!std::ranges::contains(probes.names, header)) {
                     probes.names.push_back(header);
                 }
+                if (line[k + 2].text.front() == '"' && !std::ranges::contains(probes.quoted, header)) {
+                    probes.quoted.push_back(header);
+                }
                 continue;
             }
             const bool existence = (k == 2 && (name == "ifdef" || name == "ifndef" || name == "elifdef" || name == "elifndef"))
@@ -527,14 +534,15 @@ public:
         const auto stamp   = std::chrono::duration_cast<std::chrono::nanoseconds>(modified.time_since_epoch()).count();
         const bool settled = fs::file_time_type::clock::now() - modified > std::chrono::seconds{2};
 
-        // "7": records made by an earlier scan of the header probes are not read.
+        // "8": records made by an earlier scan of the header probes are not read.
         const std::string statKey =
-            KeyHasher{}.field("7").field(absolute.generic_string()).field(std::to_string(size)).field(std::to_string(stamp)).finishHex();
+            KeyHasher{}.field("8").field(absolute.generic_string()).field(std::to_string(size)).field(std::to_string(stamp)).finishHex();
         const fs::path statPath = shard("stat", statKey);
         if (settled) {
             // Record: 64 hexadecimal digits, a space, the time-macro flag, a space, the digest's size,
             // a space, then the computed-probe and paste-join flags; then one line per probed header
-            // name, prefixed with "n ", and one per paste piece, prefixed with "p ".
+            // name, prefixed with "n ", one per name tested in quotes, prefixed with "q ",
+            // and one per paste piece, prefixed with "p ".
             if (const auto cached = readFile(statPath); cached && cached->size() > 67 && (*cached)[64] == ' ' && (*cached)[66] == ' ') {
                 const std::string_view record     = *cached;
                 const std::size_t      firstEnd   = std::min(record.find('\n'), record.size());
@@ -556,6 +564,8 @@ public:
                             const std::string_view text{line.begin(), line.end()};
                             if (text.starts_with("n ")) {
                                 info.probedHeaders.emplace_back(text.substr(2));
+                            } else if (text.starts_with("q ")) {
+                                info.quotedProbes.emplace_back(text.substr(2));
                             } else if (text.starts_with("p ")) {
                                 info.pastePieces.emplace_back(text.substr(2));
                             }
@@ -586,6 +596,7 @@ public:
         auto probes        = scanHeaderProbes(*content);
         info.probedHeaders = std::move(probes.names);
         info.computedProbe = probes.computed;
+        info.quotedProbes  = std::move(probes.quoted);
         info.pasteJoin     = probes.joins;
         info.pastePieces   = std::move(probes.pieces);
         // Not memoised if the file changed size while it was being read.
@@ -598,6 +609,9 @@ public:
                                              info.pasteJoin ? '1' : '0');
             for (const auto& name : info.probedHeaders) {
                 record += "\nn " + name;
+            }
+            for (const auto& name : info.quotedProbes) {
+                record += "\nq " + name;
             }
             for (const auto& name : info.pastePieces) {
                 record += "\np " + name;
