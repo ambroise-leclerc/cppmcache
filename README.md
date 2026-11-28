@@ -49,7 +49,7 @@ are in [docs/measurements.md](docs/measurements.md).
 **In GitHub Actions**, with a released binary and the cache kept between runs:
 
 ```yaml
-- uses: ambroise-leclerc/cppmcache@v0.1.2
+- uses: ambroise-leclerc/cppmcache@v0.1.3
 - run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER_LAUNCHER=cppmcache
 - run: cmake --build build
 - run: cppmcache -s
