@@ -896,6 +896,18 @@ std::vector<std::string> shadowCandidates(const SearchPath&               search
     // elsewhere can make any file read, and MSVC also beside each file that includes that one,
     // toolchain headers as much as project ones: a name tested in quotes is watched beside the
     // source and every recorded header.
+    // The place a tested name designates. `..` after a symbolic link leads where the operating system
+    // takes it, beside the link's target, which lexical normalisation does not: such a name is also
+    // watched where the existing directories resolve it.
+    const auto addProbe = [&](const fs::path& path) {
+        candidates.insert(comparablePath(path).generic_string());
+        if (std::ranges::contains(path, fs::path{".."})) {
+            std::error_code error;
+            if (const fs::path resolved = fs::weakly_canonical(path, error); !error) {
+                candidates.insert(comparablePath(resolved).generic_string());
+            }
+        }
+    };
     std::vector<fs::path> readDirectories{absolute(source).parent_path()};
     for (const auto& file : files) {
         if (!std::ranges::contains(readDirectories, file.parent_path())) {
@@ -905,19 +917,19 @@ std::vector<std::string> shadowCandidates(const SearchPath&               search
     for (const auto& quoted : quotedNames) {
         if (const fs::path name{quoted}; !name.is_absolute()) {
             for (const auto& directory : readDirectories) {
-                candidates.insert(comparablePath(directory / name).generic_string());
+                addProbe(directory / name);
             }
         }
     }
     for (const auto& probed : probedNames) {
         const fs::path name{probed};
         if (name.is_absolute()) {
-            candidates.insert(comparablePath(name).generic_string());
+            addProbe(name);
             continue;
         }
         for (const auto& directories : {std::cref(ordered), std::cref(projectDirectories)}) {
             for (const auto& directory : directories.get()) {
-                candidates.insert(comparablePath(directory / name).generic_string());
+                addProbe(directory / name);
             }
         }
     }

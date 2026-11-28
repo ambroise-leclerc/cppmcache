@@ -156,6 +156,7 @@ const speclab::Register uncacheableCommands{
                       checks.expect(bypassed(CompilerKind::clang, {"-c", "a.cpp", "-ftrigraphs"}), "trigraphs requested from Clang");
                       checks.expect(bypassed(CompilerKind::gcc, {"-c", "a.cpp", "--trigraphs"}), "trigraphs requested with the long option");
                       checks.expect(bypassed(CompilerKind::gcc, {"-c", "a.cpp", "-Xpreprocessor", "-DHAS=x"}), "an option forwarded to the preprocessor");
+                      checks.expect(bypassed(CompilerKind::clang, {"-c", "a.cpp", "-Wp,-DHAS=x"}), "an option forwarded with -Wp");
                       checks.expect(
                           parseCommand(CompilerKind::gcc, {"-c", "a.cpp", "--define-macro", "A=1", "--define-macro=B", "-DC", "-D", "D=2"}).macroDefinitions
                               == std::vector<std::string>{"A=1", "B", "C", "D=2"},

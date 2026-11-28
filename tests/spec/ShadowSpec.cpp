@@ -302,4 +302,30 @@ const speclab::Register probedBesideTester{
             .Execute();
     }};
 
+#ifndef _WIN32
+// Creating a symbolic link needs a privilege on Windows: the scenario runs elsewhere.
+const speclab::Register probedThroughLink{"Shadowing: a tested name that climbs out of a symbolic link", "unit,shadow", [] {
+                                              return speclab::Test("SHADOW-012")
+                                                  .Then("`..` after a link is also watched where the system resolves it, beside the target",
+                                                        [] {
+                                                            namespace fs       = std::filesystem;
+                                                            const fs::path top = fs::temp_directory_path() / "cppmcache-shadow-012";
+                                                            fs::remove_all(top);
+                                                            fs::create_directories(top / "real" / "sub");
+                                                            fs::create_directory_symlink(top / "real" / "sub", top / "link");
+                                                            const SearchPath path{{}, {top.generic_string()}};
+                                                            const Paths candidates = shadowCandidates(path, {}, cwd, "../src/m.cpp", {}, {"link/../flag.h"});
+                                                            const bool  lexical    = contains(candidates, top.generic_string() + "/flag.h");
+                                                            const bool  resolved   = contains(candidates,
+                                                                                           fs::weakly_canonical(top / "real" / "flag.h").generic_string());
+                                                            fs::remove_all(top);
+                                                            Checks checks;
+                                                            checks.expect(lexical, "where the name reads");
+                                                            checks.expect(resolved, "where the link takes it");
+                                                            checks.raise();
+                                                        })
+                                                  .Execute();
+                                          }};
+#endif
+
 }  // namespace
