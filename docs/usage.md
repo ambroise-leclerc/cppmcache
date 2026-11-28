@@ -158,7 +158,8 @@ cmake --install build --prefix ~/.local
 - Not cached: coverage and profiling builds, `-gsplit-dwarf`, header units, `-MMD`, Clang's
   two-phase `--precompile`, units that use `__DATE__` or `__TIME__`, units that read a
   `__has_include` test whose header name comes from a macro or that calls the operator under
-  another name or spelt by token pasting, and linking.
+  another name or spelt by token pasting, compilations with trigraphs enabled (`-trigraphs`,
+  `/Zc:trigraphs`, `-ansi`, or a non-GNU `-std=` before C++17 or for C), and linking.
 - With MSVC, `/Zi` is not cached, because it writes debug information to a PDB shared between
   compilations. That is CMake's default for Debug builds; `/Z7`
   (`-DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded`) is cached. Precompiled headers and `/MP` are

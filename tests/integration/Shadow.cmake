@@ -273,6 +273,36 @@ if(NOT FAMILY STREQUAL "msvc")
     file(WRITE "${WORK_DIR}/probe/flag.h" "")
     build(miss 2)
     build(hit 2)
+
+    message(STATUS "17. a system header tests a name beside itself, a directory no -I names")
+    # A sysroot makes the directory a system one. <cstdio> is not under it, so printf is declared.
+    file(MAKE_DIRECTORY "${WORK_DIR}/sysroot/usr/include/vendor")
+    file(WRITE "${WORK_DIR}/sysroot/usr/include/vendor/probe.h"
+        "#if ${has_include}(\"flag.h\")\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n")
+    file(WRITE "${WORK_DIR}/src/system.cpp"
+        "extern \"C\" int printf(const char*, ...);\n#include <vendor/probe.h>\nint main() { printf(\"%d\\n\", VALUE); }\n")
+    set(compile -std=c++23 --sysroot=sysroot -MD -MF out/main.o.d -o out/main.o -c src/system.cpp)
+    build(miss 1)
+    build(hit 1)
+    file(WRITE "${WORK_DIR}/sysroot/usr/include/vendor/flag.h" "")
+    build(miss 2)
+    build(hit 2)
+    file(REMOVE "${WORK_DIR}/sysroot/usr/include/vendor/flag.h")
+    build(hit 1)
+
+    message(STATUS "18. trigraphs replaced before lines are spliced: nothing is stored")
+    string(REPLACE "include" "??/\ninclude" trigraph "${has_include}")
+    file(WRITE "${WORK_DIR}/src/trigraph.cpp"
+        "#include <cstdio>\n#if ${trigraph}(\"flag.h\")\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n"
+        "int main() { std::printf(\"%d\\n\", VALUE); }\n")
+    file(REMOVE "${WORK_DIR}/probe/flag.h")
+    set(compile -std=c++23 -trigraphs -Wno-trigraphs -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/trigraph.cpp)
+    if(FAMILY STREQUAL "clang")
+        set(compile -std=c++23 -ftrigraphs -Wno-trigraphs -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/trigraph.cpp)
+    endif()
+    build(uncached 1)
+    file(WRITE "${WORK_DIR}/probe/flag.h" "")
+    build(uncached 2)
 endif()
 
 message(STATUS "header shadowing integration test (${FAMILY}) passed")

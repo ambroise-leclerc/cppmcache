@@ -50,15 +50,20 @@ object. ccache's direct mode has this limit; cppmcache checks for it.
 - **Tested headers.** A header that `__has_include` or `__has_include_next` looks for changes the
   result whether it exists or not, and need not be read: no recorded file points to it. The source
   and every recorded header are therefore scanned for those tests, and each name they give is a
-  candidate in every search and project directory, whichever form it was written in. The scan works
-  on preprocessing tokens, as the compiler forms them: lines are spliced first, a comment is a space,
+  candidate in every search and project directory, whichever form it was written in, and beside
+  every file that makes a test, a system header as much as a project one, since a quoted test looks
+  there first. The scan works on preprocessing tokens, as the compiler forms them: lines are spliced
+  first, a comment is a space,
   a string or character literal is one token, and so is a header name after `#include` or
   `__has_include(`, where `//` and `/*` are characters of the name. An unterminated comment or raw
   string counts as a test it cannot read. The operator named in a comment or a literal is text, and
   is ignored. A test whose name comes from a macro could look anywhere, and so could the operator
   under another name (`#define HAS __has_include`, or `-DHAS=__has_include`, since macros defined
   on the command line are read too): the operator is a test the scan can follow only when a call
-  follows it, or when `#ifdef`, `#ifndef` or `defined` only asks whether it exists.
+  follows it, or when `#ifdef`, `#ifndef` or `defined` only asks whether it exists. Trigraphs are
+  not replaced: a compilation that enables them (`-trigraphs`, `/Zc:trigraphs`, or a standard mode
+  of GCC or Clang that implies them, C++ before C++17 and every standard C) is not cached, since
+  `??/` ending a line would splice it for the compiler and not for the scan.
 - **Pasted operators.** `##` can build the operator from tokens written apart, possibly in different
   files: `JOIN(__has_, include)`. Pasting joins whole tokens, so the scan records, in macro bodies
   and `#if` conditions, the tokens that are parts of the operator's name, and whether a paste of a

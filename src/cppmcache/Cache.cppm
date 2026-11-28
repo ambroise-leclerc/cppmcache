@@ -495,8 +495,9 @@ std::optional<std::vector<std::string>> presentShadows(Context& context, const M
         scanned.push_back(absoluteNormal(context.cwd, header));
     }
     std::vector<std::string> probedNames;
-    std::string              joins;   // a file that pastes a macro argument into something that can spell the operator
-    std::vector<std::string> pieces;  // the parts of the operator's name written where a paste could use them
+    std::vector<std::string> probingFiles;  // the files that test a header, beside which their tests look
+    std::string              joins;         // a file that pastes a macro argument into something that can spell the operator
+    std::vector<std::string> pieces;        // the parts of the operator's name written where a paste could use them
     const auto               merge = [&](const std::vector<std::string>& names) {
         for (const auto& name : names) {
             if (!std::ranges::contains(probedNames, name)) {
@@ -513,6 +514,9 @@ std::optional<std::vector<std::string>> presentShadows(Context& context, const M
             return refuse(std::format("__has_include with a computed operand in {}", file.generic_string()));
         }
         merge(info->probedHeaders);
+        if (!info->probedHeaders.empty()) {
+            probingFiles.push_back(file.string());
+        }
         if (joins.empty() && info->pasteJoin) {
             joins = file.generic_string();
         }
@@ -555,7 +559,8 @@ std::optional<std::vector<std::string>> presentShadows(Context& context, const M
     if (context.kind != CompilerKind::msvc) {
         std::ranges::copy(environmentIncludeDirectories(), std::back_inserter(userDirectories));
     }
-    for (const auto& candidate : shadowCandidates(*context.searchPath, userDirectories, context.cwd, context.invocation.source, headers, probedNames)) {
+    for (const auto& candidate :
+         shadowCandidates(*context.searchPath, userDirectories, context.cwd, context.invocation.source, headers, probedNames, probingFiles)) {
         const bool regular = fs::is_regular_file(candidate, error);
         if (error && error != std::errc::no_such_file_or_directory && error != std::errc::not_a_directory) {
             context.log("error", "cannot inspect a shadow candidate");

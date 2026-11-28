@@ -138,6 +138,8 @@ const speclab::Register msvcUncacheable{"MSVC driver: commands passed through un
                                                           checks.expect(!bypassed({"/c", "a.cpp", "/Z7"}),
                                                                         "debug information embedded in the object is cacheable");
                                                           checks.expect(bypassed({"/c", "a.cpp", "/Yupch.h"}), "precompiled header");
+                                                          checks.expect(bypassed({"/c", "a.cpp", "/Zc:trigraphs"}), "trigraphs requested");
+                                                          checks.expect(!bypassed({"/c", "a.cpp", "/Zc:trigraphs-"}), "trigraphs turned off");
                                                           checks.expect(bypassed({"/E", "a.cpp"}), "preprocessing only");
                                                           checks.expect(!bypassed({"/c", "a.cpp", "/EHsc"}), "/EHsc is not /E");
                                                           checks.expect(bypassed({"/c", "a.cpp", "/MP"}), "/MP");

@@ -64,6 +64,24 @@ struct Invocation {
     bool makeModuleRules = true;
 };
 
+// Whether an option turns on trigraph replacement, which happens before lines are spliced: `??/` at
+// the end of a line then splices it, and the scan of `__has_include` tests, which does not replace
+// trigraphs, would read the file differently from the compiler. The standard modes of GCC and Clang
+// before C++17, and every standard C mode, replace them.
+bool enablesTrigraphs(std::string_view argument) {
+    if (argument == "-trigraphs" || argument == "-ftrigraphs" || argument == "-ansi" || argument == "/Zc:trigraphs" || argument == "-Zc:trigraphs") {
+        return true;
+    }
+    for (const std::string_view prefix : {"-std=", "--std="}) {
+        if (argument.starts_with(prefix)) {
+            static const std::set<std::string_view> withoutTrigraphs{"c++17", "c++1z", "c++20", "c++2a", "c++23", "c++2b", "c++26", "c++2c"};
+            const std::string_view                  standard = argument.substr(prefix.size());
+            return !standard.starts_with("gnu") && !withoutTrigraphs.contains(standard);
+        }
+    }
+    return false;
+}
+
 // Parses a GCC or Clang command; their command lines are very similar.
 Invocation parseCommand(CompilerKind kind, const std::vector<std::string>& arguments) {
     const bool                              gcc   = kind == CompilerKind::gcc;
@@ -198,6 +216,10 @@ Invocation parseCommand(CompilerKind kind, const std::vector<std::string>& argum
         };
 
         if (argument.empty()) {
+            continue;
+        }
+        if (enablesTrigraphs(argument)) {
+            bypass(std::format("trigraphs enabled by {}", argument));
             continue;
         }
         if (bypassExact.contains(argument)) {
@@ -360,6 +382,10 @@ Invocation parseMsvc(const std::vector<std::string>& arguments) {
         }
         if (argument.front() == '@') {
             bypass(std::format("unreadable response file: {}", argument));
+            continue;
+        }
+        if (enablesTrigraphs(argument)) {
+            bypass(std::format("trigraphs enabled by {}", argument));
             continue;
         }
         if (argument.front() != '/' && argument.front() != '-') {
@@ -773,7 +799,8 @@ std::vector<std::string> shadowCandidates(const SearchPath&               search
                                           const fs::path&                 cwd,
                                           const std::string&              source,
                                           const std::vector<std::string>& dependencies,
-                                          const std::vector<std::string>& probedNames = {}) {
+                                          const std::vector<std::string>& probedNames  = {},
+                                          const std::vector<std::string>& probingFiles = {}) {
     // Every path is made comparable first: on Windows the compiler's report and the command line
     // do not spell a directory the same way.
     const auto absolute = [&](const std::string& path) {
@@ -863,13 +890,22 @@ std::vector<std::string> shadowCandidates(const SearchPath&               search
             }
         }
     }
+    // A quoted test looks beside the file that makes it first, and MSVC also beside each file that
+    // includes it, toolchain headers as much as project ones: every directory of a file that tests
+    // something is watched for every name tested.
+    std::vector<fs::path> probingDirectories;
+    for (const auto& file : probingFiles) {
+        if (const fs::path directory = absolute(file).parent_path(); !std::ranges::contains(probingDirectories, directory)) {
+            probingDirectories.push_back(directory);
+        }
+    }
     for (const auto& probed : probedNames) {
         const fs::path name{probed};
         if (name.is_absolute()) {
             candidates.insert(comparablePath(name).generic_string());
             continue;
         }
-        for (const auto& directories : {std::cref(ordered), std::cref(projectDirectories)}) {
+        for (const auto& directories : {std::cref(ordered), std::cref(projectDirectories), std::cref(probingDirectories)}) {
             for (const auto& directory : directories.get()) {
                 candidates.insert(comparablePath(directory / name).generic_string());
             }

@@ -281,4 +281,21 @@ const speclab::Register probedHeaders{
             .Execute();
     }};
 
+const speclab::Register probedBesideTester{
+    "Shadowing: a header tested from inside a system directory",
+    "unit,shadow",
+    [] {
+        return speclab::Test("SHADOW-011")
+            .Then("the name is also a candidate beside the file that tests it, which no search directory is",
+                  [] {
+                      const SearchPath path{{}, {sdk}};
+                      const Paths      candidates = shadowCandidates(path, {}, cwd, "../src/m.cpp", {sdk + "/sub/a.h"}, {"flag.h"}, {sdk + "/sub/a.h"});
+                      Checks           checks;
+                      checks.expect(contains(candidates, sdk + "/sub/flag.h"), "beside the testing header");
+                      checks.expect(contains(candidates, sdk + "/flag.h"), "in the search directory");
+                      checks.raise();
+                  })
+            .Execute();
+    }};
+
 }  // namespace
