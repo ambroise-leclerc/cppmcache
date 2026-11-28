@@ -8,7 +8,7 @@ The repository is also an action that installs a released binary, checks it agai
 of the release, puts it on the `PATH` and keeps the cache directory between runs.
 
 ```yaml
-- uses: ambroise-leclerc/cppmcache@v0.1.2
+- uses: ambroise-leclerc/cppmcache@v0.1.3
   with:
     cache-key: ${{ matrix.compiler }}   # jobs that must not share a cache get different values
 - run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER_LAUNCHER=cppmcache
@@ -18,7 +18,7 @@ of the release, puts it on the `PATH` and keeps the cache directory between runs
 
 | Input            | Default                    | Meaning                                                        |
 |------------------|----------------------------|----------------------------------------------------------------|
-| `version`        | `latest`                   | version to install, such as `0.1.2`                            |
+| `version`        | `latest`                   | version to install, such as `0.1.3`                            |
 | `sha256sums`     | empty                      | digests the archive must match, in `SHA256SUMS` format         |
 | `cache`          | `true`                     | restore and save the cache directory with `actions/cache`      |
 | `cache-key`      | empty                      | text added to the key of the saved cache                       |
@@ -43,13 +43,13 @@ steps, and its outputs are `version`, `path` and `cache-directory`.
   for its own archive:
 
   ```yaml
-  - uses: ambroise-leclerc/cppmcache@<commit>   # v0.1.2
+  - uses: ambroise-leclerc/cppmcache@<commit>   # v0.1.3
     with:
-      version: 0.1.2
+      version: 0.1.3
       sha256sums: |
-        <sha256>  cppmcache-0.1.2-linux-x86_64.tar.gz
-        <sha256>  cppmcache-0.1.2-macos-arm64.tar.gz
-        <sha256>  cppmcache-0.1.2-windows-x86_64.zip
+        <sha256>  cppmcache-0.1.3-linux-x86_64.tar.gz
+        <sha256>  cppmcache-0.1.3-macos-arm64.tar.gz
+        <sha256>  cppmcache-0.1.3-windows-x86_64.zip
   ```
 
 - The token the action is given serves only to look up the latest release; it is removed from the
