@@ -152,9 +152,15 @@ cmake --install build --prefix ~/.local
 - A header created where it shadows a recorded one is detected, and the unit is recompiled (see
   [design.md](design.md#header-shadowing)). The detection covers the directories of the search path
   and those of the project's own files. It does not cover a header added inside the toolchain's
-  directories next to a toolchain header that includes it with quotes, nor macOS frameworks.
+  directories next to a toolchain header that includes it with quotes, nor macOS frameworks. A
+  header that `__has_include` tests is detected in the same places when it appears or disappears,
+  whether or not the unit includes it.
 - Not cached: coverage and profiling builds, `-gsplit-dwarf`, header units, `-MMD`, Clang's
-  two-phase `--precompile`, units that use `__DATE__` or `__TIME__`, and linking.
+  two-phase `--precompile`, units that use `__DATE__` or `__TIME__`, units that read a
+  `__has_include` test whose header name comes from a macro or that calls the operator under
+  another name or spelt by token pasting, compilations with trigraphs enabled (`-trigraphs`,
+  `/Zc:trigraphs`, `-ansi`, or a non-GNU `-std=` before C++17 or for C), options forwarded with
+  `-Xpreprocessor`, and linking.
 - With MSVC, `/Zi` is not cached, because it writes debug information to a PDB shared between
   compilations. That is CMake's default for Debug builds; `/Z7`
   (`-DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded`) is cached. Precompiled headers and `/MP` are

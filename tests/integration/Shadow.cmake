@@ -53,6 +53,8 @@ function(build expected output)
         message(FATAL_ERROR "hit expected, got ${hits} hit(s) and ${misses} miss(es)")
     elseif(expected STREQUAL "miss" AND (NOT hits EQUAL 0 OR NOT misses EQUAL 1))
         message(FATAL_ERROR "miss expected, got ${hits} hit(s) and ${misses} miss(es): a stale object was served")
+    elseif(expected STREQUAL "uncached" AND (NOT hits EQUAL 0 OR NOT misses EQUAL 0))
+        message(FATAL_ERROR "neither a hit nor a stored miss expected, got ${hits} hit(s) and ${misses} miss(es)")
     endif()
     execute_process(COMMAND "${COMPILER}" ${link}
         WORKING_DIRECTORY "${WORK_DIR}" RESULT_VARIABLE status OUTPUT_VARIABLE log ERROR_VARIABLE log)
@@ -162,5 +164,230 @@ build(hit 1)
 file(WRITE "${WORK_DIR}/src/shared/x.h" "#define VALUE 2\n")
 build(miss 2)
 build(hit 2)
+
+message(STATUS "11. a header tested with __has_include, absent, then created: no file read before has changed")
+# The operator's name is split so that this script, were it ever scanned, would test nothing itself.
+set(has_include "__has_include")
+file(MAKE_DIRECTORY "${WORK_DIR}/probe")
+file(WRITE "${WORK_DIR}/src/probe.cpp"
+    "#include <cstdio>\n#if ${has_include}(\"optional.h\")\n#include \"optional.h\"\n#endif\n"
+    "#ifndef VALUE\n#define VALUE 1\n#endif\nint main() { std::printf(\"%d\\n\", VALUE); }\n")
+if(FAMILY STREQUAL "msvc")
+    set(compile /nologo /std:c++latest /EHsc /Iprobe /Foout/main.obj /c src/probe.cpp)
+else()
+    set(compile -std=c++23 -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/probe.cpp)
+endif()
+build(miss 1)
+build(hit 1)
+file(WRITE "${WORK_DIR}/probe/optional.h" "#define VALUE 2\n")
+build(miss 2)
+build(hit 2)
+file(REMOVE "${WORK_DIR}/probe/optional.h")
+build(hit 1)
+
+message(STATUS "12. a header name supplied by a macro: where it would appear cannot be known, nothing is stored")
+file(WRITE "${WORK_DIR}/src/computed.cpp"
+    "#include <cstdio>\n#define NAME \"optional.h\"\n#if ${has_include}(NAME)\n#include NAME\n#endif\n"
+    "#ifndef VALUE\n#define VALUE 1\n#endif\nint main() { std::printf(\"%d\\n\", VALUE); }\n")
+if(FAMILY STREQUAL "msvc")
+    set(compile /nologo /std:c++latest /EHsc /Iprobe /Foout/main.obj /c src/computed.cpp)
+else()
+    set(compile -std=c++23 -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/computed.cpp)
+endif()
+build(uncached 1)
+file(WRITE "${WORK_DIR}/probe/optional.h" "#define VALUE 2\n")
+build(uncached 2)
+
+message(STATUS "13. a header only tested, never included: it appears, then disappears, and each state has its own result")
+# The test is written as GCC and Clang accept it, through a comment and a spliced line, which the
+# scan must see as the preprocessor does. MSVC gets the plain form.
+if(FAMILY STREQUAL "msvc")
+    set(test "${has_include}(\"flag.h\")")
+else()
+    string(REPLACE "include" "\\\ninclude" spliced "${has_include}")
+    set(test "${spliced} /* a comment */ (\"flag.h\")")
+endif()
+file(WRITE "${WORK_DIR}/src/flag.cpp"
+    "#include <cstdio>\n#if ${test}\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n"
+    "int main() { std::printf(\"%d\\n\", VALUE); }\n")
+file(REMOVE "${WORK_DIR}/probe/optional.h")
+if(FAMILY STREQUAL "msvc")
+    set(compile /nologo /std:c++latest /EHsc /Iprobe /Foout/main.obj /c src/flag.cpp)
+else()
+    set(compile -std=c++23 -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/flag.cpp)
+endif()
+build(miss 1)
+build(hit 1)
+file(WRITE "${WORK_DIR}/probe/flag.h" "")
+build(miss 2)
+build(hit 2)
+file(REMOVE "${WORK_DIR}/probe/flag.h")
+build(hit 1)
+file(WRITE "${WORK_DIR}/probe/flag.h" "")
+build(hit 2)
+
+message(STATUS "14. the operator under another name: what it tests cannot be followed, nothing is stored")
+file(WRITE "${WORK_DIR}/src/alias.cpp"
+    "#include <cstdio>\n#define HAS ${has_include}\n#if HAS(\"flag.h\")\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n"
+    "int main() { std::printf(\"%d\\n\", VALUE); }\n")
+file(REMOVE "${WORK_DIR}/probe/flag.h")
+if(FAMILY STREQUAL "msvc")
+    set(compile /nologo /std:c++latest /EHsc /Iprobe /Foout/main.obj /c src/alias.cpp)
+else()
+    set(compile -std=c++23 -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/alias.cpp)
+endif()
+build(uncached 1)
+file(WRITE "${WORK_DIR}/probe/flag.h" "")
+build(uncached 2)
+
+message(STATUS "20. a textual header named like a BMI is scanned for its tests too")
+file(WRITE "${WORK_DIR}/src/textual.pcm" "#if ${has_include}(\"flag.h\")\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n")
+file(WRITE "${WORK_DIR}/src/textual.cpp"
+    "#include <cstdio>\n#include \"textual.pcm\"\nint main() { std::printf(\"%d\\n\", VALUE); }\n")
+file(REMOVE "${WORK_DIR}/probe/flag.h")
+if(FAMILY STREQUAL "msvc")
+    set(compile /nologo /std:c++latest /EHsc /Iprobe /Foout/main.obj /c src/textual.cpp)
+else()
+    set(compile -std=c++23 -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/textual.cpp)
+endif()
+build(miss 1)
+build(hit 1)
+file(WRITE "${WORK_DIR}/probe/flag.h" "")
+build(miss 2)
+build(hit 2)
+file(REMOVE "${WORK_DIR}/probe/flag.h")
+
+if(NOT FAMILY STREQUAL "msvc")
+    message(STATUS "15. the operator spelt by token pasting: what it tests cannot be followed, nothing is stored")
+    string(SUBSTRING "${has_include}" 0 6 has_prefix)
+    file(WRITE "${WORK_DIR}/src/paste.cpp"
+        "#include <cstdio>\n#define JOIN(a, b) a ## b\n#if JOIN(${has_prefix}, include)(\"flag.h\")\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n"
+        "int main() { std::printf(\"%d\\n\", VALUE); }\n")
+    file(REMOVE "${WORK_DIR}/probe/flag.h")
+    set(compile -std=c++23 -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/paste.cpp)
+    build(uncached 1)
+    file(WRITE "${WORK_DIR}/probe/flag.h" "")
+    build(uncached 2)
+
+    message(STATUS "15b. the operator renamed on the command line: nothing is stored")
+    file(WRITE "${WORK_DIR}/src/defined.cpp"
+        "#include <cstdio>\n#if HAS(\"flag.h\")\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n"
+        "int main() { std::printf(\"%d\\n\", VALUE); }\n")
+    file(REMOVE "${WORK_DIR}/probe/flag.h")
+    set(compile -std=c++23 -DHAS=${has_include} -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/defined.cpp)
+    build(uncached 1)
+    file(WRITE "${WORK_DIR}/probe/flag.h" "")
+    build(uncached 2)
+
+    message(STATUS "16. // inside an angle header name does not hide the test after it")
+    file(WRITE "${WORK_DIR}/src/slashes.cpp"
+        "#include <cstdio>\n#if ${has_include}(<a//b>) || ${has_include}(\"flag.h\")\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n"
+        "int main() { std::printf(\"%d\\n\", VALUE); }\n")
+    file(REMOVE "${WORK_DIR}/probe/flag.h")
+    set(compile -std=c++23 -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/slashes.cpp)
+    build(miss 1)
+    build(hit 1)
+    file(WRITE "${WORK_DIR}/probe/flag.h" "")
+    build(miss 2)
+    build(hit 2)
+
+    message(STATUS "17. a system header tests a name beside itself, a directory no -I names")
+    # -iwithprefixbefore adds a search directory that no -I names, as a system directory is. On
+    # macOS, --sysroot would not add it. printf is declared, so nothing else is needed from it.
+    file(MAKE_DIRECTORY "${WORK_DIR}/sysroot/usr/include/vendor")
+    file(WRITE "${WORK_DIR}/sysroot/usr/include/vendor/probe.h"
+        "#if ${has_include}(\"flag.h\")\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n")
+    file(WRITE "${WORK_DIR}/src/system.cpp"
+        "extern \"C\" int printf(const char*, ...);\n#include <vendor/probe.h>\nint main() { printf(\"%d\\n\", VALUE); }\n")
+    set(compile -std=c++23 -iprefix sysroot/ -iwithprefixbefore usr/include -MD -MF out/main.o.d -o out/main.o -c src/system.cpp)
+    build(miss 1)
+    build(hit 1)
+    file(WRITE "${WORK_DIR}/sysroot/usr/include/vendor/flag.h" "")
+    build(miss 2)
+    build(hit 2)
+    file(REMOVE "${WORK_DIR}/sysroot/usr/include/vendor/flag.h")
+    build(hit 1)
+
+    message(STATUS "19. a quoted test in a macro looks beside the header that expands it")
+    file(MAKE_DIRECTORY "${WORK_DIR}/sysroot/usr/include/vendor/expand")
+    file(WRITE "${WORK_DIR}/sysroot/usr/include/vendor/define.h" "#define HAS_FLAG ${has_include}(\"flag.h\")\n")
+    file(WRITE "${WORK_DIR}/sysroot/usr/include/vendor/expand/use.h"
+        "#include <vendor/define.h>\n#if HAS_FLAG\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n")
+    file(WRITE "${WORK_DIR}/src/expand.cpp"
+        "extern \"C\" int printf(const char*, ...);\n#include <vendor/expand/use.h>\nint main() { printf(\"%d\\n\", VALUE); }\n")
+    set(compile -std=c++23 -iprefix sysroot/ -iwithprefixbefore usr/include -MD -MF out/main.o.d -o out/main.o -c src/expand.cpp)
+    build(miss 1)
+    build(hit 1)
+    file(WRITE "${WORK_DIR}/sysroot/usr/include/vendor/expand/flag.h" "")
+    build(miss 2)
+    build(hit 2)
+    file(REMOVE "${WORK_DIR}/sysroot/usr/include/vendor/expand/flag.h")
+    build(hit 1)
+
+    message(STATUS "21. a tested header that appears or disappears while the compiler runs: nothing is stored")
+    # A wrapper, named so that it is recognised as the compiler, changes the tested header right
+    # after the real compiler has evaluated the test.
+    set(real_compiler "${COMPILER}")
+    if(FAMILY STREQUAL "gcc")
+        set(wrapper "${WORK_DIR}/racing-g++")
+    else()
+        set(wrapper "${WORK_DIR}/racing-clang++")
+    endif()
+    file(WRITE "${WORK_DIR}/src/race.cpp"
+        "#include <cstdio>\n#if ${has_include}(\"flag.h\")\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n"
+        "int main() { std::printf(\"%d\\n\", VALUE); }\n")
+    set(compile -std=c++23 -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/race.cpp)
+    foreach(change "touch" "remove")
+        if(change STREQUAL "touch")
+            file(REMOVE "${WORK_DIR}/probe/flag.h")
+            set(action ": > probe/flag.h")
+            set(printed 1)
+        else()
+            file(WRITE "${WORK_DIR}/probe/flag.h" "")
+            set(action "rm -f probe/flag.h")
+            set(printed 2)
+        endif()
+        file(WRITE "${wrapper}" "#!/bin/sh\n\"${real_compiler}\" \"$@\" || exit $?\ncase \" $* \" in *\" src/race.cpp \"*) ${action} ;; esac\n")
+        file(CHMOD "${wrapper}" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
+        set(COMPILER "${wrapper}")
+        build(uncached ${printed})
+        set(COMPILER "${real_compiler}")
+    endforeach()
+    file(REMOVE "${WORK_DIR}/probe/flag.h")
+    # The same removal from the directory that also receives the object, whose date the object
+    # changes anyway.
+    file(WRITE "${WORK_DIR}/out/flag.h" "")
+    file(WRITE "${wrapper}" "#!/bin/sh\n\"${real_compiler}\" \"$@\" || exit $?\ncase \" $* \" in *\" src/race.cpp \"*) rm -f out/flag.h ;; esac\n")
+    set(compile -std=c++23 -Iout -MD -MF out/main.o.d -o out/main.o -c src/race.cpp)
+    set(COMPILER "${wrapper}")
+    build(uncached 2)
+    set(COMPILER "${real_compiler}")
+    # And the removal of the whole directory that held it.
+    file(REMOVE "${WORK_DIR}/out/flag.h")
+    file(MAKE_DIRECTORY "${WORK_DIR}/nest/deep/er")
+    file(WRITE "${WORK_DIR}/nest/deep/er/flag.h" "")
+    file(WRITE "${WORK_DIR}/src/nested.cpp"
+        "#include <cstdio>\n#if ${has_include}(\"deep/er/flag.h\")\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n"
+        "int main() { std::printf(\"%d\\n\", VALUE); }\n")
+    file(WRITE "${wrapper}" "#!/bin/sh\n\"${real_compiler}\" \"$@\" || exit $?\ncase \" $* \" in *\" src/nested.cpp \"*) rm -rf nest/deep/er ;; esac\n")
+    set(compile -std=c++23 -Inest -MD -MF out/main.o.d -o out/main.o -c src/nested.cpp)
+    set(COMPILER "${wrapper}")
+    build(uncached 2)
+    set(COMPILER "${real_compiler}")
+
+    message(STATUS "18. trigraphs replaced before lines are spliced: nothing is stored")
+    string(REPLACE "include" "??/\ninclude" trigraph "${has_include}")
+    file(WRITE "${WORK_DIR}/src/trigraph.cpp"
+        "#include <cstdio>\n#if ${trigraph}(\"flag.h\")\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n"
+        "int main() { std::printf(\"%d\\n\", VALUE); }\n")
+    file(REMOVE "${WORK_DIR}/probe/flag.h")
+    set(compile -std=c++23 -trigraphs -Wno-trigraphs -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/trigraph.cpp)
+    if(FAMILY STREQUAL "clang")
+        set(compile -std=c++23 -ftrigraphs -Wno-trigraphs -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/trigraph.cpp)
+    endif()
+    build(uncached 1)
+    file(WRITE "${WORK_DIR}/probe/flag.h" "")
+    build(uncached 2)
+endif()
 
 message(STATUS "header shadowing integration test (${FAMILY}) passed")

@@ -149,6 +149,20 @@ const speclab::Register uncacheableCommands{
                       checks.expect(bypassed(CompilerKind::clang, {"-c", "a.cpp", "-fmodule-file=a.pcm"}), "-fmodule-file without a name");
                       checks.expect(bypassed(CompilerKind::clang, {"-c", "a.cpp", "-fprebuilt-module-path=."}), "implicit BMI lookup");
                       checks.expect(bypassed(CompilerKind::clang, {"-c", "a.cpp", "-Xclang", "-emit-module-interface"}), "-Xclang");
+                      checks.expect(bypassed(CompilerKind::gcc, {"-c", "a.cpp", "-trigraphs"}), "trigraphs requested");
+                      checks.expect(bypassed(CompilerKind::gcc, {"-c", "a.cpp", "-std=c++14"}), "trigraphs of a standard mode before C++17");
+                      checks.expect(bypassed(CompilerKind::gcc, {"-c", "a.cpp", "-ansi"}), "trigraphs of -ansi");
+                      checks.expect(bypassed(CompilerKind::clang, {"-c", "a.c", "-std=c11"}), "trigraphs of a standard C mode");
+                      checks.expect(bypassed(CompilerKind::clang, {"-c", "a.cpp", "-ftrigraphs"}), "trigraphs requested from Clang");
+                      checks.expect(bypassed(CompilerKind::gcc, {"-c", "a.cpp", "--trigraphs"}), "trigraphs requested with the long option");
+                      checks.expect(bypassed(CompilerKind::gcc, {"-c", "a.cpp", "-Xpreprocessor", "-DHAS=x"}), "an option forwarded to the preprocessor");
+                      checks.expect(bypassed(CompilerKind::clang, {"-c", "a.cpp", "-Wp,-DHAS=x"}), "an option forwarded with -Wp");
+                      checks.expect(
+                          parseCommand(CompilerKind::gcc, {"-c", "a.cpp", "--define-macro", "A=1", "--define-macro=B", "-DC", "-D", "D=2"}).macroDefinitions
+                              == std::vector<std::string>{"A=1", "B", "C", "D=2"},
+                          "every spelling of a macro definition is read");
+                      checks.expect(!bypassed(CompilerKind::gcc, {"-c", "a.cpp", "-std=gnu++14"}), "no trigraphs in a GNU mode");
+                      checks.expect(!bypassed(CompilerKind::gcc, {"-c", "a.cpp", "-std=c++17"}), "no trigraphs from C++17");
                       checks.raise();
                   })
             .Execute();

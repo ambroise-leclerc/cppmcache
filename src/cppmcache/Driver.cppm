@@ -58,50 +58,52 @@ struct Invocation {
     std::string                        moduleOutput;        // Clang, MSVC: BMI produced (-fmodule-output=, /ifcOutput), empty if absent
     std::map<std::string, std::string> moduleFiles;         // Clang, MSVC: -fmodule-file=name=path, /reference name=path
     std::vector<std::string>           includeDirectories;  // directories named by -I, -iquote, -isystem, -idirafter, /I…, in order
+    std::vector<std::string>           macroDefinitions;    // values of -D and /D, as written: NAME, NAME=VALUE
     std::string                        bypass;              // reason why the command is not cacheable, empty otherwise
     // With -fdeps-format=, GCC no longer writes the `name.c++-module` rules in the dependency file.
     bool makeModuleRules = true;
 };
 
+// Whether an option turns on trigraph replacement, which happens before lines are spliced: `??/` at
+// the end of a line then splices it, and the scan of `__has_include` tests, which does not replace
+// trigraphs, would read the file differently from the compiler. The standard modes of GCC and Clang
+// before C++17, and every standard C mode, replace them.
+bool enablesTrigraphs(std::string_view argument) {
+    if (argument == "-trigraphs" || argument == "--trigraphs" || argument == "-ftrigraphs" || argument == "-ansi" || argument == "/Zc:trigraphs"
+        || argument == "-Zc:trigraphs") {
+        return true;
+    }
+    for (const std::string_view prefix : {"-std=", "--std="}) {
+        if (argument.starts_with(prefix)) {
+            static const std::set<std::string_view> withoutTrigraphs{"c++17", "c++1z", "c++20", "c++2a", "c++23", "c++2b", "c++26", "c++2c"};
+            const std::string_view                  standard = argument.substr(prefix.size());
+            return !standard.starts_with("gnu") && !withoutTrigraphs.contains(standard);
+        }
+    }
+    return false;
+}
+
 // Parses a GCC or Clang command; their command lines are very similar.
 Invocation parseCommand(CompilerKind kind, const std::vector<std::string>& arguments) {
     const bool                              gcc   = kind == CompilerKind::gcc;
     const bool                              clang = kind == CompilerKind::clang;
-    static const std::set<std::string_view> separateValue{"-I",
-                                                          "-D",
-                                                          "-U",
-                                                          "-include",
-                                                          "-isystem",
-                                                          "-iquote",
-                                                          "-idirafter",
-                                                          "-imacros",
-                                                          "-isysroot",
-                                                          "-iprefix",
-                                                          "-iwithprefix",
-                                                          "-iwithprefixbefore",
-                                                          "-imultilib",
-                                                          "-x",
-                                                          "--param",
-                                                          "-B",
-                                                          "-L",
-                                                          "-l",
-                                                          "-u",
-                                                          "-T",
-                                                          "-Xpreprocessor",
-                                                          "-Xassembler",
-                                                          "-Xlinker",
-                                                          "-A",
-                                                          "-G",
-                                                          "-aux-info",
-                                                          "-z",
-                                                          "-e",
-                                                          "-target",
-                                                          "-arch",
-                                                          "-isystem-after",
-                                                          "-iframework",
-                                                          "-F",
-                                                          "--sysroot",
-                                                          "-gcc-toolchain",
+    static const std::set<std::string_view> separateValue{"-I",           "-D",
+                                                          "-U",           "-include",
+                                                          "-isystem",     "-iquote",
+                                                          "-idirafter",   "-imacros",
+                                                          "-isysroot",    "-iprefix",
+                                                          "-iwithprefix", "-iwithprefixbefore",
+                                                          "-imultilib",   "-x",
+                                                          "--param",      "-B",
+                                                          "-L",           "-l",
+                                                          "-u",           "-T",
+                                                          "-Xassembler",  "-Xlinker",
+                                                          "-A",           "-G",
+                                                          "-aux-info",    "-z",
+                                                          "-e",           "-target",
+                                                          "-arch",        "-isystem-after",
+                                                          "-iframework",  "-F",
+                                                          "--sysroot",    "-gcc-toolchain",
                                                           "-mllvm"};
     // Clang-specific options that fall outside the model: implicit modules, additional outputs.
     static const std::set<std::string_view>       clangBypassExact{"-fmodules",
@@ -199,6 +201,29 @@ Invocation parseCommand(CompilerKind kind, const std::vector<std::string>& argum
         if (argument.empty()) {
             continue;
         }
+        if (enablesTrigraphs(argument)) {
+            bypass(std::format("trigraphs enabled by {}", argument));
+            continue;
+        }
+        // An option handed to the preprocessor unseen could define a macro or turn trigraphs on
+        // where the scan of __has_include tests would not know it.
+        if (argument == "-Xpreprocessor") {
+            bypass("option forwarded with -Xpreprocessor");
+            continue;
+        }
+        if (argument == "--define-macro" || argument.starts_with("--define-macro=")) {
+            if (argument == "--define-macro") {
+                invocation.keyArguments.push_back(argument);
+                if (i + 1 < arguments.size()) {
+                    invocation.macroDefinitions.push_back(arguments[i + 1]);
+                    invocation.keyArguments.push_back(arguments[++i]);
+                }
+            } else {
+                invocation.macroDefinitions.push_back(argument.substr(std::string_view{"--define-macro="}.size()));
+                invocation.keyArguments.push_back(argument);
+            }
+            continue;
+        }
         if (bypassExact.contains(argument)) {
             bypass(std::format("unsupported option: {}", argument));
             continue;
@@ -263,9 +288,15 @@ Invocation parseCommand(CompilerKind kind, const std::vector<std::string>& argum
                 if (std::ranges::contains(includeOptions, std::string_view{argument})) {
                     invocation.includeDirectories.push_back(arguments[i + 1]);
                 }
+                if (argument == "-D") {
+                    invocation.macroDefinitions.push_back(arguments[i + 1]);
+                }
                 invocation.keyArguments.push_back(arguments[++i]);
             }
         } else if (argument.front() == '-') {
+            if (argument.starts_with("-D") && argument.size() > 2) {
+                invocation.macroDefinitions.push_back(argument.substr(2));
+            }
             // -Idir, -isystemdir…: the directory is joined to the option.
             for (const auto option : includeOptions) {
                 if (argument.starts_with(option) && argument.size() > option.size()) {
@@ -355,6 +386,10 @@ Invocation parseMsvc(const std::vector<std::string>& arguments) {
             bypass(std::format("unreadable response file: {}", argument));
             continue;
         }
+        if (enablesTrigraphs(argument)) {
+            bypass(std::format("trigraphs enabled by {}", argument));
+            continue;
+        }
         if (argument.front() != '/' && argument.front() != '-') {
             sources.push_back(argument);
             invocation.keyArguments.push_back(argument);
@@ -415,6 +450,8 @@ Invocation parseMsvc(const std::vector<std::string>& arguments) {
             const std::string value = next();
             if (option == "I" || option == "external:I") {
                 invocation.includeDirectories.push_back(value);
+            } else if (option == "D") {
+                invocation.macroDefinitions.push_back(value);
             }
             invocation.keyArguments.push_back(std::format("/{}", option));
             invocation.keyArguments.push_back(value);
@@ -424,6 +461,8 @@ Invocation parseMsvc(const std::vector<std::string>& arguments) {
                 invocation.includeDirectories.emplace_back(option.substr(10));
             } else if (option.starts_with("I") && option.size() > 1) {
                 invocation.includeDirectories.emplace_back(option.substr(1));
+            } else if (option.starts_with("D") && option.size() > 1) {
+                invocation.macroDefinitions.emplace_back(option.substr(1));
             }
             invocation.keyArguments.push_back(std::format("/{}", option));
         }
@@ -752,11 +791,18 @@ std::vector<std::string> searchPathProbe(const Invocation& invocation, const std
 // The name an include directive used is not known, so every directory that contains the file gives
 // a hypothesis. A candidate that already exists and did not win is harmless: the caller records
 // which ones existed when the entry was made, and only a new one invalidates it.
+//
+// `probedNames` are the header names tested with `__has_include` or `__has_include_next`. A test that
+// failed read no file, so nothing among `dependencies` says where its header would be: it would be
+// found wherever its name resolves in any searched or project directory, and every such place is a
+// candidate. That is wider than the compiler's own lookup for the form written, never narrower.
 std::vector<std::string> shadowCandidates(const SearchPath&               searchPath,
                                           const std::vector<std::string>& userDirectories,
                                           const fs::path&                 cwd,
                                           const std::string&              source,
-                                          const std::vector<std::string>& dependencies) {
+                                          const std::vector<std::string>& dependencies,
+                                          const std::vector<std::string>& probedNames = {},
+                                          const std::vector<std::string>& quotedNames = {}) {
     // Every path is made comparable first: on Windows the compiler's report and the command line
     // do not spell a directory the same way.
     const auto absolute = [&](const std::string& path) {
@@ -843,6 +889,47 @@ std::vector<std::string> shadowCandidates(const SearchPath&               search
                         candidates.insert(candidate.generic_string());
                     }
                 }
+            }
+        }
+    }
+    // A quoted test looks first beside the file where it is evaluated, which a macro defined
+    // elsewhere can make any file read, and MSVC also beside each file that includes that one,
+    // toolchain headers as much as project ones: a name tested in quotes is watched beside the
+    // source and every recorded header.
+    // The place a tested name designates. `..` after a symbolic link leads where the operating system
+    // takes it, beside the link's target, which lexical normalisation does not: such a name is also
+    // watched where the existing directories resolve it.
+    const auto addProbe = [&](const fs::path& path) {
+        candidates.insert(comparablePath(path).generic_string());
+        if (std::ranges::contains(path, fs::path{".."})) {
+            std::error_code error;
+            if (const fs::path resolved = fs::weakly_canonical(path, error); !error) {
+                candidates.insert(comparablePath(resolved).generic_string());
+            }
+        }
+    };
+    std::vector<fs::path> readDirectories{absolute(source).parent_path()};
+    for (const auto& file : files) {
+        if (!std::ranges::contains(readDirectories, file.parent_path())) {
+            readDirectories.push_back(file.parent_path());
+        }
+    }
+    for (const auto& quoted : quotedNames) {
+        if (const fs::path name{quoted}; !name.is_absolute()) {
+            for (const auto& directory : readDirectories) {
+                addProbe(directory / name);
+            }
+        }
+    }
+    for (const auto& probed : probedNames) {
+        const fs::path name{probed};
+        if (name.is_absolute()) {
+            addProbe(name);
+            continue;
+        }
+        for (const auto& directories : {std::cref(ordered), std::cref(projectDirectories)}) {
+            for (const auto& directory : directories.get()) {
+                addProbe(directory / name);
             }
         }
     }

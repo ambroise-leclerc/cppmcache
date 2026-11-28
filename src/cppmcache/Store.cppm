@@ -110,7 +110,337 @@ std::optional<std::string> readFile(const fs::path& path) {
 struct FileInfo {
     Digest digest;
     bool   timeMacros = false;  // the content mentions one of the preprocessor's date and time macros
+    // The header names the content tests with `__has_include` or `__has_include_next`, spelt as
+    // written between the quotes or angle brackets. A header that is absent leaves no trace among
+    // the files a compilation read, so these names are what tells the cache where one could appear.
+    std::vector<std::string> probedHeaders;
+    // Those of them tested in quotes: such a test looks first beside the file where it is expanded,
+    // which a macro can make another file than this one.
+    std::vector<std::string> quotedProbes;
+    // One of those tests names its header through a macro, so where it looks cannot be known.
+    bool computedProbe = false;
+    // Token pasting can build the operator's name out of tokens that may come from different files.
+    // `pasteJoin` says the content pastes a macro argument where the result could be the operator;
+    // `pastePieces` are the parts of the operator's name it writes where a paste could use them.
+    std::vector<std::string> pastePieces;
+    bool                     pasteJoin = false;
+    bool                     binary    = false;  // the content holds a NUL byte, as a BMI does and a textual header does not
 };
+
+// What `scanHeaderProbes` finds in a file.
+struct HeaderProbes {
+    std::vector<std::string> names;
+    std::vector<std::string> quoted;  // those of `names` tested in quotes, which look beside a file first
+    bool                     computed = false;
+    bool                     joins    = false;
+    std::vector<std::string> pieces;
+};
+
+// The header names of `__has_include` and `__has_include_next` tests in `content`, found on the
+// preprocessing tokens rather than on the text: lines are spliced, comments are spaces, literals and
+// header names are single tokens. A mention that only asks whether the operator exists (`#ifdef`,
+// `#ifndef`, `defined`) or defines a fallback for it tests nothing. Any other use that is not a call
+// with a literal header name, such as a macro operand or an alias, is reported as computed.
+HeaderProbes scanHeaderProbes(std::string_view raw) {
+    // Split in two so that scanning this file finds nothing.
+    constexpr std::string_view operatorName = "__has_"
+                                              "include";
+    constexpr std::string_view nextName     = "__has_"
+                                              "include_next";
+
+    // Line splicing comes before tokenisation: a backslash ending a line can fall inside the
+    // operator's name or its operand. GCC and Clang also splice when spaces follow the backslash.
+    std::string content;
+    content.reserve(raw.size());
+    for (std::size_t i = 0; i < raw.size(); ++i) {
+        if (raw[i] == '\\') {
+            std::size_t next = i + 1;
+            while (next < raw.size() && (raw[next] == ' ' || raw[next] == '\t')) {
+                ++next;
+            }
+            if (next < raw.size() && raw[next] == '\r') {
+                ++next;
+            }
+            if (next < raw.size() && raw[next] == '\n') {
+                i = next;
+                continue;
+            }
+        }
+        content.push_back(raw[i]);
+    }
+
+    enum class Kind { identifier, number, literal, headerName, punctuator, newline };
+    struct Token {
+        Kind             kind;
+        std::string_view text;
+        bool             spaceBefore;
+    };
+    const auto identifierStart = [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$' || static_cast<unsigned char>(c) >= 0x80;
+    };
+    const auto identifierChar = [&](char c) {
+        return identifierStart(c) || (c >= '0' && c <= '9');
+    };
+    const auto is = [](const Token& token, std::string_view text) {
+        return token.text == text && token.kind != Kind::literal && token.kind != Kind::headerName;
+    };
+
+    HeaderProbes       probes;
+    std::vector<Token> tokens;
+    std::size_t        lineStart = 0;  // index in `tokens` of the current line's first token
+    bool               space     = false;
+    const auto         push      = [&](Kind kind, std::size_t begin, std::size_t end) {
+        tokens.push_back({kind, std::string_view{content}.substr(begin, end - begin), space});
+        space = false;
+    };
+    // Whether a `<` or `"` at this point opens a header name: after `#include` and its kin, after
+    // `import`, and as the operand of `__has_include(`. Elsewhere, `//` inside `<a//b>` is a comment.
+    const auto headerNameContext = [&] {
+        const std::span<const Token> line{tokens.begin() + static_cast<std::ptrdiff_t>(lineStart), tokens.end()};
+        if (line.size() == 2 && is(line[0], "#") && line[1].kind == Kind::identifier
+            && (line[1].text == "include" || line[1].text == "include_next" || line[1].text == "import" || line[1].text == "embed")) {
+            return true;
+        }
+        if ((line.size() == 1 && is(line[0], "import")) || (line.size() == 2 && is(line[0], "export") && is(line[1], "import"))) {
+            return true;
+        }
+        return line.size() >= 2 && is(line.back(), "(") && line[line.size() - 2].kind == Kind::identifier
+               && (line[line.size() - 2].text == operatorName || line[line.size() - 2].text == nextName || line[line.size() - 2].text == "__has_embed");
+    };
+
+    for (std::size_t i = 0; i < content.size();) {
+        const char             c    = content[i];
+        const std::string_view rest = std::string_view{content}.substr(i);
+        if (c == '\n') {
+            push(Kind::newline, i, i + 1);
+            lineStart = tokens.size();
+            ++i;
+        } else if (c == ' ' || c == '\t' || c == '\v' || c == '\f' || c == '\r') {
+            space = true;
+            ++i;
+        } else if (rest.starts_with("//")) {
+            space = true;
+            i     = std::min(content.find('\n', i), content.size());
+        } else if (rest.starts_with("/*")) {
+            const std::size_t end = content.find("*/", i + 2);
+            if (end == std::string::npos) {
+                // What follows cannot be read as the compiler reads it.
+                probes.computed = true;
+                break;
+            }
+            space = true;
+            i     = end + 2;
+        } else if ((c == '<' || c == '"') && headerNameContext()) {
+            const std::size_t end = content.find_first_of(std::string{c == '<' ? '>' : '"', '\n'}, i + 1);
+            if (end != std::string::npos && content[end] != '\n') {
+                push(Kind::headerName, i, end + 1);
+                i = end + 1;
+            } else {
+                push(Kind::punctuator, i, i + 1);
+                ++i;
+            }
+        } else if (identifierStart(c)) {
+            std::size_t end = i + 1;
+            while (end < content.size() && identifierChar(content[end])) {
+                ++end;
+            }
+            const std::string_view word   = std::string_view{content}.substr(i, end - i);
+            const bool             prefix = word == "u8" || word == "u" || word == "U" || word == "L";
+            const bool             raw    = word == "R" || word == "u8R" || word == "uR" || word == "UR" || word == "LR";
+            if (end < content.size() && raw && content[end] == '"') {
+                const std::size_t open  = content.find('(', end + 1);
+                const std::size_t close = open == std::string::npos ? std::string::npos
+                                                                    : content.find(")" + content.substr(end + 1, open - end - 1) + "\"", open + 1);
+                if (close == std::string::npos) {
+                    probes.computed = true;
+                    break;
+                }
+                const std::size_t last = close + (open - end - 1) + 2;
+                push(Kind::literal, i, last);
+                i = last;
+            } else if (end < content.size() && prefix && (content[end] == '"' || content[end] == '\'')) {
+                // An encoding prefix: the literal that follows is the token.
+                i = end;
+            } else {
+                push(Kind::identifier, i, end);
+                i = end;
+            }
+        } else if ((c >= '0' && c <= '9') || (c == '.' && i + 1 < content.size() && content[i + 1] >= '0' && content[i + 1] <= '9')) {
+            std::size_t end = i + 1;
+            while (end < content.size()) {
+                const char d = content[end];
+                if (identifierChar(d) || d == '.') {
+                    ++end;
+                } else if (d == '\'' && end + 1 < content.size() && identifierChar(content[end + 1])) {
+                    end += 2;
+                } else if ((d == '+' || d == '-')
+                           && (content[end - 1] == 'e' || content[end - 1] == 'E' || content[end - 1] == 'p' || content[end - 1] == 'P')) {
+                    ++end;
+                } else {
+                    break;
+                }
+            }
+            push(Kind::number, i, end);
+            i = end;
+        } else if (c == '"' || c == '\'') {
+            std::size_t end = i + 1;
+            while (end < content.size() && content[end] != c && content[end] != '\n') {
+                end += content[end] == '\\' ? 2 : 1;
+            }
+            end = std::min(end + 1, content.size());
+            push(Kind::literal, i, end);
+            i = end;
+        } else if (rest.starts_with("##") || rest.starts_with("%:%:")) {
+            tokens.push_back({Kind::punctuator, "##", space});
+            space = false;
+            i    += rest.starts_with("##") ? 2 : 4;
+        } else if (rest.starts_with("%:")) {
+            tokens.push_back({Kind::punctuator, "#", space});
+            space = false;
+            i    += 2;
+        } else {
+            push(Kind::punctuator, i, i + 1);
+            ++i;
+        }
+    }
+
+    // Whether a sequence of pasted operands, each a known spelling or a macro parameter (nothing),
+    // can spell `target`; a parameter stands for any text, the empty one included.
+    using Operands    = std::vector<std::optional<std::string_view>>;
+    const auto spells = [](this const auto& self, std::span<const std::optional<std::string_view>> operands, std::string_view target) -> bool {
+        if (operands.empty()) {
+            return target.empty();
+        }
+        if (operands.front()) {
+            return target.starts_with(*operands.front()) && self(operands.subspan(1), target.substr(operands.front()->size()));
+        }
+        for (std::size_t length = 0; length <= target.size(); ++length) {
+            if (self(operands.subspan(1), target.substr(length))) {
+                return true;
+            }
+        }
+        return false;
+    };
+    // A part of the operator's name, other than the operator itself: what a paste could join to
+    // others to spell it. Pasting joins whole tokens, so only tokens that are such parts matter.
+    const auto piece = [&](std::string_view name) {
+        if (!name.empty() && name != operatorName && name != nextName && nextName.contains(name) && !std::ranges::contains(probes.pieces, name)) {
+            probes.pieces.emplace_back(name);
+        }
+    };
+
+    // Each logical line, examined once tokenised.
+    std::size_t begin = 0;
+    while (begin < tokens.size()) {
+        std::size_t end = begin;
+        while (end < tokens.size() && tokens[end].kind != Kind::newline) {
+            ++end;
+        }
+        const std::span<const Token> line{tokens.begin() + static_cast<std::ptrdiff_t>(begin), tokens.begin() + static_cast<std::ptrdiff_t>(end)};
+        begin = end + 1;
+
+        const bool             directive = !line.empty() && is(line[0], "#");
+        const std::string_view name      = directive && line.size() > 1 && line[1].kind == Kind::identifier ? line[1].text : std::string_view{};
+
+        for (std::size_t k = 0; k < line.size(); ++k) {
+            if (line[k].kind != Kind::identifier || (line[k].text != operatorName && line[k].text != nextName)) {
+                continue;
+            }
+            // `#define __has_include(x) 0` supplies a fallback, `#undef` removes one.
+            if (k == 2 && (name == "define" || name == "undef")) {
+                continue;
+            }
+            if (k + 1 < line.size() && is(line[k + 1], "(")) {
+                const bool literal = k + 2 < line.size() && line[k + 2].kind == Kind::headerName && line[k + 2].text.size() > 2;
+                if (!literal) {
+                    probes.computed = true;
+                    continue;
+                }
+                const std::string header{line[k + 2].text.substr(1, line[k + 2].text.size() - 2)};
+                if (!std::ranges::contains(probes.names, header)) {
+                    probes.names.push_back(header);
+                }
+                if (line[k + 2].text.front() == '"' && !std::ranges::contains(probes.quoted, header)) {
+                    probes.quoted.push_back(header);
+                }
+                continue;
+            }
+            const bool existence = (k == 2 && (name == "ifdef" || name == "ifndef" || name == "elifdef" || name == "elifndef"))
+                                   || (k >= 1 && is(line[k - 1], "defined")) || (k >= 2 && is(line[k - 1], "(") && is(line[k - 2], "defined"));
+            if (!existence) {
+                probes.computed = true;
+            }
+        }
+
+        // Where a name can still be pasted or handed to a macro that pastes: the body of a macro,
+        // and the condition of an `#if` or `#elif`, the only place the operator is evaluated.
+        std::size_t                   body = line.size();
+        std::vector<std::string_view> parameters;
+        if (name == "define" && line.size() > 2 && line[2].kind == Kind::identifier) {
+            body = 3;
+            if (line.size() > 3 && is(line[3], "(") && !line[3].spaceBefore) {
+                for (body = 4; body < line.size() && !is(line[body], ")"); ++body) {
+                    if (line[body].kind == Kind::identifier) {
+                        parameters.push_back(line[body].text);
+                    } else if (is(line[body], ".")) {
+                        parameters.emplace_back("__VA_ARGS__");
+                    }
+                }
+                ++body;
+            }
+        } else if (name == "if" || name == "elif") {
+            body = 2;
+        }
+        for (std::size_t k = body; k < line.size(); ++k) {
+            const bool pasted = (k + 1 < line.size() && is(line[k + 1], "##")) || (k > body && is(line[k - 1], "##"));
+            if (!pasted) {
+                if (line[k].kind == Kind::identifier && !std::ranges::contains(parameters, line[k].text)) {
+                    piece(line[k].text);
+                }
+                continue;
+            }
+            // A chain `a ## b ## c`, read from its first operand.
+            if (k > body && is(line[k - 1], "##")) {
+                continue;
+            }
+            Operands operands;
+            for (std::size_t j = k; j < line.size(); j += 2) {
+                const bool parameter = line[j].kind == Kind::identifier && std::ranges::contains(parameters, line[j].text);
+                operands.push_back(parameter ? std::nullopt : std::optional{line[j].text});
+                if (j + 1 >= line.size() || !is(line[j + 1], "##")) {
+                    break;
+                }
+            }
+            // With no parameter, the chain spells one name, which is either the operator, a piece
+            // of it, or unrelated. With one, it spells the operator only if the arguments bring
+            // pieces from elsewhere.
+            const bool literal = std::ranges::all_of(operands, [](const auto& operand) {
+                return operand.has_value();
+            });
+            if (!literal) {
+                if (spells(operands, operatorName) || spells(operands, nextName)) {
+                    probes.joins = true;
+                    for (const auto& operand : operands) {
+                        if (operand) {
+                            piece(*operand);
+                        }
+                    }
+                }
+                continue;
+            }
+            std::string spelt;
+            for (const auto& operand : operands) {
+                spelt += *operand;
+            }
+            if (spelt == operatorName || spelt == nextName) {
+                probes.computed = true;
+            } else {
+                piece(spelt);
+            }
+        }
+    }
+    return probes;
+}
 
 class Store {
 public:
@@ -205,19 +535,45 @@ public:
         const auto stamp   = std::chrono::duration_cast<std::chrono::nanoseconds>(modified.time_since_epoch()).count();
         const bool settled = fs::file_time_type::clock::now() - modified > std::chrono::seconds{2};
 
+        // "9": records made by an earlier scan of the header probes are not read.
         const std::string statKey =
-            KeyHasher{}.field("3").field(absolute.generic_string()).field(std::to_string(size)).field(std::to_string(stamp)).finishHex();
+            KeyHasher{}.field("9").field(absolute.generic_string()).field(std::to_string(size)).field(std::to_string(stamp)).finishHex();
         const fs::path statPath = shard("stat", statKey);
         if (settled) {
-            // Record: 64 hexadecimal digits, a space, the time-macro flag, a space, the digest's size.
+            // Record: 64 hexadecimal digits, a space, the time-macro flag, a space, the digest's size,
+            // a space, then the computed-probe, paste-join and binary flags; then one line per probed header
+            // name, prefixed with "n ", one per name tested in quotes, prefixed with "q ",
+            // and one per paste piece, prefixed with "p ".
             if (const auto cached = readFile(statPath); cached && cached->size() > 67 && (*cached)[64] == ' ' && (*cached)[66] == ' ') {
+                const std::string_view record     = *cached;
+                const std::size_t      firstEnd   = std::min(record.find('\n'), record.size());
+                const std::string_view first      = record.substr(0, firstEnd);
                 std::int64_t           digestSize = 0;
-                const std::string_view digits     = std::string_view{*cached}.substr(67);
-                if (std::from_chars(digits.data(), digits.data() + digits.size(), digestSize).ec == std::errc{}) {
-                    return FileInfo{
-                        Digest{cached->substr(0, 64), digestSize},
-                        (*cached)[65] == '1'
-                    };
+                const std::string_view digits     = first.substr(67);
+                const auto [sizeEnd, sizeError]   = std::from_chars(digits.data(), digits.data() + digits.size(), digestSize);
+                const std::string_view rest       = digits.substr(static_cast<std::size_t>(sizeEnd - digits.data()));
+                if (sizeError == std::errc{} && rest.size() == 4 && rest[0] == ' ' && std::ranges::all_of(rest.substr(1), [](char flag) {
+                        return flag == '0' || flag == '1';
+                    })) {
+                    FileInfo info;
+                    info.digest        = Digest{cached->substr(0, 64), digestSize};
+                    info.timeMacros    = (*cached)[65] == '1';
+                    info.computedProbe = rest[1] == '1';
+                    info.pasteJoin     = rest[2] == '1';
+                    info.binary        = rest[3] == '1';
+                    if (firstEnd < record.size()) {
+                        for (const auto line : std::views::split(record.substr(firstEnd + 1), '\n')) {
+                            const std::string_view text{line.begin(), line.end()};
+                            if (text.starts_with("n ")) {
+                                info.probedHeaders.emplace_back(text.substr(2));
+                            } else if (text.starts_with("q ")) {
+                                info.quotedProbes.emplace_back(text.substr(2));
+                            } else if (text.starts_with("p ")) {
+                                info.pastePieces.emplace_back(text.substr(2));
+                            }
+                        }
+                    }
+                    return info;
                 }
             }
         }
@@ -239,9 +595,32 @@ public:
                                                "ME__")
                           || content->contains("__TIME"
                                                "STAMP__");
+        auto probes        = scanHeaderProbes(*content);
+        info.probedHeaders = std::move(probes.names);
+        info.computedProbe = probes.computed;
+        info.quotedProbes  = std::move(probes.quoted);
+        info.pasteJoin     = probes.joins;
+        info.binary        = content->contains('\0');
+        info.pastePieces   = std::move(probes.pieces);
         // Not memoised if the file changed size while it was being read.
         if (settled && content->size() == size) {
-            writeAtomic(statPath, std::format("{} {} {}", info.digest.hash, info.timeMacros ? '1' : '0', info.digest.size));
+            std::string record = std::format("{} {} {} {}{}{}",
+                                             info.digest.hash,
+                                             info.timeMacros ? '1' : '0',
+                                             info.digest.size,
+                                             info.computedProbe ? '1' : '0',
+                                             info.pasteJoin ? '1' : '0',
+                                             info.binary ? '1' : '0');
+            for (const auto& name : info.probedHeaders) {
+                record += "\nn " + name;
+            }
+            for (const auto& name : info.quotedProbes) {
+                record += "\nq " + name;
+            }
+            for (const auto& name : info.pastePieces) {
+                record += "\np " + name;
+            }
+            writeAtomic(statPath, record);
         }
         return info;
     }

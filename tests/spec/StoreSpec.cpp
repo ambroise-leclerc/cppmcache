@@ -171,4 +171,165 @@ const speclab::Register manifestRoundTrip{"Manifest: round trip and corrupted en
                                                   .Execute();
                                           }};
 
+// The operator's name is split in each literal below, as in Store.cppm, so that scanning a source of
+// this suite never finds a test of its own.
+const speclab::Register headerProbes{"Storage: the headers a file tests for with __has_include", "unit,store,shadow", [] {
+                                         return speclab::Test("STORE-006")
+                                             .Then("literal names are collected, mentions are ignored and a macro operand is reported",
+                                                   [] {
+                                                       const auto probes       = scanHeaderProbes("#ifdef __has_"
+                                                                                                  "include\n"
+                                                                                                  "#if defined(__has_"
+                                                                                                  "include) && __has_"
+                                                                                                  "include(\"optional.h\")\n"
+                                                                                                  "#endif\n"
+                                                                                                  "#if __has_"
+                                                                                                  "include( <sub/dir.h> ) || __has_"
+                                                                                                  "include_next(<next.h>)\n"
+                                                                                                  "#endif\n"
+                                                                                                  "#if __has_"
+                                                                                                  "include \\\n (\"optional.h\")\n"
+                                                                                                  "#endif\n"
+                                                                                                  "# define __has_"
+                                                                                                  "include(x) 0\n");
+                                                       const auto computed     = scanHeaderProbes("#define HAS(h) __has_"
+                                                                                                  "include(h)\n");
+                                                       const auto unterminated = scanHeaderProbes("#if __has_"
+                                                                                                  "include(\"open\n");
+                                                       const auto lookalike    = scanHeaderProbes("int my__has_"
+                                                                                                  "include(int); int __has_"
+                                                                                                  "includes(int);\n");
+                                                       Checks     checks;
+                                                       checks.expect(probes.names == std::vector<std::string>{"optional.h", "sub/dir.h", "next.h"},
+                                                                     "the three names, each once, in order of appearance");
+                                                       checks.expect(!probes.computed, "the fallback #define and the mentions test nothing");
+                                                       checks.expect(computed.computed && computed.names.empty(), "a macro operand cannot be resolved");
+                                                       checks.expect(unterminated.computed, "an unterminated name is treated as unknown");
+                                                       checks.expect(lookalike.names.empty() && !lookalike.computed, "other identifiers are not the operator");
+                                                       checks.raise();
+                                                   })
+                                             .Execute();
+                                     }};
+
+const speclab::Register probeForms{"Storage: a test the preprocessor still sees through comments and spliced lines", "unit,store,shadow", [] {
+                                       return speclab::Test("STORE-008")
+                                           .Then("comments count as spaces and lines are spliced before the operator is looked for",
+                                                 [] {
+                                                     const auto commented = scanHeaderProbes("#if __has_"
+                                                                                             "include /**/ ( /* a\n b */ \"one.h\")\n"
+                                                                                             "#endif\n");
+                                                     const auto spliced   = scanHeaderProbes("#if __has_\\\n"
+                                                                                             "include(<two.h>) || __has_\\  \r\n"
+                                                                                             "include_next(\"thr\\\nee.h\")\n"
+                                                                                             "#endif\n");
+                                                     const auto lineEnd   = scanHeaderProbes("#if defined __has_"
+                                                                                             "include // (\"not.h\")\n"
+                                                                                             "#endif\n");
+                                                     const auto open      = scanHeaderProbes("#if __has_"
+                                                                                             "include /* (\"four.h\")\n");
+                                                     Checks     checks;
+                                                     checks.expect(commented.names == std::vector<std::string>{"one.h"} && !commented.computed,
+                                                                   "a block comment, even over two lines, separates the operator from its operand");
+                                                     checks.expect(spliced.names == std::vector<std::string>{"two.h", "three.h"} && !spliced.computed,
+                                                                   "a backslash-newline inside the name, after spaces, or inside the operand, is spliced");
+                                                     checks.expect(lineEnd.names.empty() && !lineEnd.computed, "a line comment ends the directive");
+                                                     checks.expect(open.computed, "an unterminated block comment is treated as unknown");
+                                                     checks.raise();
+                                                 })
+                                           .Execute();
+                                   }};
+
+const speclab::Register probeAliases{"Storage: a name the operator is given elsewhere is a test the scan cannot follow", "unit,store,shadow", [] {
+                                         return speclab::Test("STORE-009")
+                                             .Then("an alias is reported as unknown, while text that only names the operator is not",
+                                                   [] {
+                                                       const auto alias   = scanHeaderProbes("#define HAS __has_"
+                                                                                             "include\n#if HAS(\"flag.h\")\n#endif\n");
+                                                       const auto guarded = scanHeaderProbes("#ifndef __has_"
+                                                                                             "include\n#elif !defined __has_"
+                                                                                             "include || defined ( __has_"
+                                                                                             "include )\n#endif // __has_"
+                                                                                             "include\n/* __has_"
+                                                                                             "include argument */\n"
+                                                                                             "#error \"the __has_"
+                                                                                             "include check\"\n"
+                                                                                             "const char* raw = R\"x(\" __has_"
+                                                                                             "include )x\";\n"
+                                                                                             "int n = 1'000; char c = '\"'; // __has_"
+                                                                                             "include\n");
+                                                       const auto after   = scanHeaderProbes("int n = 1'0; char q = '\\''; const char* s = \"/*\";\n#if __has_"
+                                                                                             "include(<after.h>)\n#endif\n");
+                                                       Checks     checks;
+                                                       checks.expect(alias.computed, "an alias makes the operand unknown");
+                                                       checks.expect(guarded.names.empty() && !guarded.computed,
+                                                                     "#ifndef, defined, comments, string, raw string and character literals test nothing");
+                                                       checks.expect(
+                                                           after.names == std::vector<std::string>{"after.h"} && !after.computed,
+                                                           "digit separators, escaped quotes and a comment opener in a string do not hide what follows");
+                                                       checks.raise();
+                                                   })
+                                             .Execute();
+                                     }};
+
+const speclab::Register probeTokens{
+    "Storage: header names and token pasting, as the preprocessor reads them",
+    "unit,store,shadow",
+    [] {
+        return speclab::Test("STORE-010")
+            .Then("a header name is one token, and a paste that could spell the operator is reported",
+                  [] {
+                      const auto slashes = scanHeaderProbes("#if __has_"
+                                                            "include(<a//b>) || __has_"
+                                                            "include(\"c/*d\") || __has_"
+                                                            "include(\"e\\\")\n"
+                                                            "#include <f/*g>\n#if __has_"
+                                                            "include(<h.h>)\n#endif\n");
+                      const auto joiner  = scanHeaderProbes("#define JOIN(a, b) a ## b\n");
+                      const auto offered = scanHeaderProbes("#if JOIN(__has_, include)(\"flag.h\")\n#endif\n");
+                      const auto literal = scanHeaderProbes("#define HAS __has_ %:%: include\n");
+                      const auto suffix  = scanHeaderProbes("#define CHK(f) __ ## f ## _chk\n#define S s\n");
+                      Checks     checks;
+                      checks.expect(slashes.names == std::vector<std::string>{"a//b", "c/*d", "e\\", "h.h"} && !slashes.computed,
+                                    "// and /* inside a header name, and a backslash before its closing quote, are part of the name");
+                      checks.expect(joiner.joins && joiner.pieces.empty(), "pasting two arguments can spell anything");
+                      checks.expect(!offered.joins && offered.pieces == std::vector<std::string>{"__has_", "include"},
+                                    "the pieces handed to it in a condition are recorded");
+                      checks.expect(literal.computed, "a paste of written tokens that spells the operator, digraph included, is unknown");
+                      checks.expect(!suffix.joins && suffix.pieces == std::vector<std::string>{"s"}, "a paste that cannot end as the operator joins nothing");
+                      checks.raise();
+                  })
+            .Execute();
+    }};
+
+const speclab::Register probesMemo{"Storage: the memoised digest keeps the probed headers", "unit,store,shadow", [] {
+                                       return speclab::Test<Sandbox>("STORE-007")
+                                           .Given("two files old enough to be memoised, one with a literal test and one with a macro operand",
+                                                  [](Sandbox& sandbox) {
+                                                      fs::create_directories(sandbox.root);
+                                                      std::ofstream{sandbox.root / "literal.h", std::ios::binary} << "#if __has_"
+                                                                                                                     "include(<a.h>) || __has_"
+                                                                                                                     "include(\"b.h\")\n#endif\n";
+                                                      std::ofstream{sandbox.root / "macro.h", std::ios::binary} << "#if __has_"
+                                                                                                                   "include(NAME)\n#endif\n";
+                                                      for (const char* name : {"literal.h", "macro.h"}) {
+                                                          fs::last_write_time(sandbox.root / name, fs::file_time_type::clock::now() - std::chrono::hours{1});
+                                                      }
+                                                  })
+                                           .Then("a second read, from the memo, reports what the first one found",
+                                                 [](Sandbox& sandbox) {
+                                                     const auto literal = sandbox.store.fileInfo(sandbox.root / "literal.h");
+                                                     const auto memo    = sandbox.store.fileInfo(sandbox.root / "literal.h");
+                                                     sandbox.store.fileInfo(sandbox.root / "macro.h");
+                                                     const auto macro = sandbox.store.fileInfo(sandbox.root / "macro.h");
+                                                     Checks     checks;
+                                                     checks.expect(literal && literal->probedHeaders == std::vector<std::string>{"a.h", "b.h"}, "scanned");
+                                                     checks.expect(memo && memo->probedHeaders == literal->probedHeaders && !memo->computedProbe
+                                                                       && memo->digest == literal->digest,
+                                                                   "memoised");
+                                                     checks.expect(macro && macro->computedProbe && macro->probedHeaders.empty(), "macro operand memoised");
+                                                     checks.raise();
+                                                 })
+                                           .Execute();
+                                   }};
+
 }  // namespace

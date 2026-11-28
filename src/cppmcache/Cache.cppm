@@ -39,7 +39,9 @@ struct ManifestEntry {
     std::vector<Import>      imports;
     std::vector<std::string> provides;
     // Files that existed, when the entry was made, where a header shadowing one of the dependencies
-    // would be: they did not win then. Any other file found in such a place invalidates the entry.
+    // would be, or where a header tested with __has_include would be found. The entry is valid only
+    // while exactly these exist there: one that appears can win an include or turn a test true, and
+    // one that disappears can turn a test false without being a dependency.
     std::vector<std::string> knownShadows;
 
     friend bool operator==(const ManifestEntry&, const ManifestEntry&) = default;
@@ -130,7 +132,9 @@ std::vector<ManifestEntry> decodeManifest(std::string_view encoded) {
 
 namespace cppmcache {
 
-constexpr std::string_view formatVersion      = "6";
+// "7": entries made before tested headers were recorded among the known shadows would match
+// without them once such a header is removed, and are not read.
+constexpr std::string_view formatVersion      = "7";
 constexpr std::size_t      maxManifestEntries = 32;
 
 // Environment variables that influence the compiler's output.
@@ -229,6 +233,13 @@ struct Context {
         }
         for (const auto& import : entry.imports) {
             tree.add("bmi/" + import.name, import.digest);
+        }
+        // Whether a tested header exists changes the object without changing any dependency: two
+        // entries that differ only there must not share an ActionResult. Only existence matters, so
+        // each such file is an empty entry of the tree.
+        static const Digest present = digestOf("");
+        for (const auto& path : entry.knownShadows) {
+            tree.add("present/" + treePath(path), present);
         }
         Action result{digestOf(fullCommand(entry).encode()), tree.rootDigest(), platform};
         Digest digest = digestOf(result.encode());
@@ -435,19 +446,137 @@ bool ensureSearchPath(Context& context) {
     return false;
 }
 
-// The files that exist now where a header shadowing one of the entry's dependencies would be, in
-// the form a manifest records them. Nothing if the search path of the compiler is unknown.
-std::optional<std::vector<std::string>> presentShadows(Context& context, const ManifestEntry& entry) {
-    if (!ensureSearchPath(context)) {
-        return std::nullopt;
+// The operator's names, split so that scanning this file finds nothing.
+constexpr std::string_view hasIncludeName     = "__has_"
+                                                "include";
+constexpr std::string_view hasIncludeNextName = "__has_"
+                                                "include_next";
+
+// Whether `name` is a concatenation of `pieces`, each used any number of times.
+bool spelledByPieces(std::string_view name, const std::vector<std::string>& pieces) {
+    std::vector<bool> reachable(name.size() + 1, false);
+    reachable[0] = true;
+    for (std::size_t at = 0; at < name.size(); ++at) {
+        if (!reachable[at]) {
+            continue;
+        }
+        for (const auto& piece : pieces) {
+            if (!piece.empty() && name.substr(at).starts_with(piece)) {
+                reachable[at + piece.size()] = true;
+            }
+        }
     }
+    return reachable[name.size()];
+}
+
+// The files that exist now where a header shadowing one of the entry's dependencies would be, in
+// the form a manifest records them. Nothing if the search path of the compiler is unknown, or if a
+// `__has_include` test could look where no candidate is; `obstacle` then says which.
+std::optional<std::vector<std::string>> presentShadows(Context&                  context,
+                                                       const ManifestEntry&      entry,
+                                                       std::string*              obstacle = nullptr,
+                                                       std::vector<fs::path>*    watched  = nullptr,
+                                                       std::vector<std::string>* tested   = nullptr) {
+    const auto refuse = [&](std::string reason) -> std::optional<std::vector<std::string>> {
+        if (obstacle != nullptr) {
+            *obstacle = std::move(reason);
+        }
+        return std::nullopt;
+    };
+    if (!ensureSearchPath(context)) {
+        return refuse("include search path unknown");
+    }
+    // An imported BMI is recorded as a dependency; nothing shadows it and it tests nothing. Its
+    // extension is not enough to tell it, since a textual header could share it: it must also be
+    // binary, which a header is not.
     std::vector<std::string> headers;
     for (const auto& dependency : entry.dependencies) {
         const std::string extension = fs::path{dependency.path}.extension().string();
-        // An indirectly imported BMI is recorded as a dependency; nothing shadows it.
-        if (extension != ".gcm" && extension != ".bmi" && extension != ".pcm" && extension != ".ifc") {
-            headers.push_back(dependency.path);
+        if (extension == ".gcm" || extension == ".bmi" || extension == ".pcm" || extension == ".ifc") {
+            const auto info = context.store.fileInfo(absoluteNormal(context.cwd, dependency.path));
+            if (!info) {
+                return refuse(std::format("unreadable file: {}", dependency.path));
+            }
+            if (info->binary) {
+                continue;
+            }
         }
+        headers.push_back(dependency.path);
+    }
+    // The headers the source and those files tested for, found or not: one that was absent can
+    // appear, and change the result of the test, without any file read before having changed.
+    std::vector<fs::path> scanned{context.sourceAbsolute};
+    for (const auto& header : headers) {
+        scanned.push_back(absoluteNormal(context.cwd, header));
+    }
+    std::vector<std::string> probedNames;
+    std::vector<std::string> quotedNames;  // the names tested in quotes, which look beside the expanding file first
+    std::string              joins;        // a file that pastes a macro argument into something that can spell the operator
+    std::vector<std::string> pieces;       // the parts of the operator's name written where a paste could use them
+    const auto               merge = [&](const std::vector<std::string>& names) {
+        for (const auto& name : names) {
+            if (!std::ranges::contains(probedNames, name)) {
+                probedNames.push_back(name);
+            }
+        }
+    };
+    for (const auto& file : scanned) {
+        const auto info = context.store.fileInfo(file);
+        if (!info) {
+            return refuse(std::format("unreadable file: {}", file.generic_string()));
+        }
+        if (info->computedProbe) {
+            return refuse(std::format("__has_include with a computed operand in {}", file.generic_string()));
+        }
+        merge(info->probedHeaders);
+        for (const auto& name : info->quotedProbes) {
+            if (!std::ranges::contains(quotedNames, name)) {
+                quotedNames.push_back(name);
+            }
+        }
+        if (joins.empty() && info->pasteJoin) {
+            joins = file.generic_string();
+        }
+        for (const auto& piece : info->pastePieces) {
+            if (!std::ranges::contains(pieces, piece)) {
+                pieces.push_back(piece);
+            }
+        }
+    }
+    // A macro defined on the command line is read like a `#define` line of a file.
+    for (const auto& definition : context.invocation.macroDefinitions) {
+        std::string line = definition;
+        if (const auto equals = line.find_first_of(context.kind == CompilerKind::msvc ? "=#" : "="); equals != std::string::npos) {
+            line[equals] = ' ';
+        } else {
+            line += " 1";
+        }
+        const auto probes = scanHeaderProbes(std::format("#define {}\n", line));
+        if (probes.computed) {
+            return refuse(std::format("__has_include with a computed operand in the definition of {}", definition));
+        }
+        merge(probes.names);
+        for (const auto& name : probes.quoted) {
+            if (!std::ranges::contains(quotedNames, name)) {
+                quotedNames.push_back(name);
+            }
+        }
+        if (joins.empty() && probes.joins) {
+            joins = std::format("-D{}", definition);
+        }
+        for (const auto& piece : probes.pieces) {
+            if (!std::ranges::contains(pieces, piece)) {
+                pieces.push_back(piece);
+            }
+        }
+    }
+    // Pasting joins whole tokens: the operator can be built only if the pieces written somewhere
+    // spell it end to end.
+    if (!joins.empty() && (spelledByPieces(hasIncludeName, pieces) || spelledByPieces(hasIncludeNextName, pieces))) {
+        return refuse(std::format("__has_include may be built by token pasting, in {}", joins));
+    }
+    if (tested != nullptr) {
+        *tested = probedNames;
     }
     std::vector<std::string> present;
     std::error_code          error;
@@ -455,7 +584,11 @@ std::optional<std::vector<std::string>> presentShadows(Context& context, const M
     if (context.kind != CompilerKind::msvc) {
         std::ranges::copy(environmentIncludeDirectories(), std::back_inserter(userDirectories));
     }
-    for (const auto& candidate : shadowCandidates(*context.searchPath, userDirectories, context.cwd, context.invocation.source, headers)) {
+    for (const auto& candidate :
+         shadowCandidates(*context.searchPath, userDirectories, context.cwd, context.invocation.source, headers, probedNames, quotedNames)) {
+        if (watched != nullptr) {
+            watched->emplace_back(candidate);
+        }
         const bool regular = fs::is_regular_file(candidate, error);
         if (error && error != std::errc::no_such_file_or_directory && error != std::errc::not_a_directory) {
             context.log("error", "cannot inspect a shadow candidate");
@@ -490,11 +623,15 @@ bool entryMatches(Context& context, const ManifestEntry& entry) {
         return false;
     }
     // Every recorded file is unchanged. A header created since, earlier in the search order, would
-    // still change what the compiler reads: the entry is only valid if no such file has appeared.
+    // still change what the compiler reads, and a tested header created or removed would change the
+    // result of the test: the entry is only valid if exactly the recorded files exist there.
     const auto present = presentShadows(context, entry);
-    return present && std::ranges::all_of(*present, [&](const std::string& path) {
-               return std::ranges::contains(entry.knownShadows, path);
-           });
+    if (!present) {
+        return false;
+    }
+    auto known = entry.knownShadows;
+    std::ranges::sort(known);
+    return *present == known;
 }
 
 // Restores the outputs recorded for a matching entry. What the local store lacks is fetched from
@@ -668,6 +805,26 @@ int compileAndStore(Context& context) {
         before[name] = stateOf(file);
     }
 
+    // Writing the outputs changes the dates of the directories that receive them, so the date of
+    // such a directory cannot reveal a tested header removed from it while the compiler runs: what
+    // they hold is listed beforehand instead.
+    std::vector<fs::path> outputDirectories;
+    for (const std::string& output : {invocation.object, invocation.depfile, invocation.moduleOutput}) {
+        if (!output.empty()) {
+            if (const fs::path directory = comparablePath(absoluteNormal(context.cwd, output).parent_path());
+                !std::ranges::contains(outputDirectories, directory)) {
+                outputDirectories.push_back(directory);
+            }
+        }
+    }
+    std::set<fs::path> outputEntries;
+    for (const auto& directory : outputDirectories) {
+        std::error_code listing;
+        for (fs::directory_iterator item{directory, listing}; !listing && item != fs::directory_iterator{}; item.increment(listing)) {
+            outputEntries.insert(comparablePath(item->path()));
+        }
+    }
+
     const auto        started        = fs::file_time_type::clock::now();
     const int         exitCode       = executeCaptured(commandLine, capturedOutput, capturedError);
     const std::string standardOutput = readFile(capturedOutput).value_or("");
@@ -794,9 +951,72 @@ int compileAndStore(Context& context) {
     // What already sits where a shadowing header would be did not win this compilation. Without
     // the compiler's search path that cannot be told, and the result is not stored: an entry that
     // cannot be checked against a new header must not exist.
-    const auto shadows = presentShadows(context, entry);
+    // A test whose header name a macro supplies, or whose operator is built or renamed, could look
+    // anywhere: no set of places to watch covers it, so the result is not stored.
+    std::string              obstacle;
+    std::vector<fs::path>    watched;
+    std::vector<std::string> tested;
+    const auto               shadows = presentShadows(context, entry, &obstacle, &watched, &tested);
     if (!shadows) {
-        return uncacheable("include search path unknown");
+        return uncacheable(obstacle);
+    }
+    // The places are inspected after the compilation: a file that appeared there, changed or left
+    // while the compiler ran may not be in the state it saw. A file present is dated; a removal is
+    // dated by its directory, or, in a directory that receives the outputs, told by the listing made
+    // before the compiler ran.
+    std::set<fs::path> bases{comparablePath(context.sourceAbsolute.parent_path())};
+    for (const auto& list : {std::cref(context.searchPath->quote), std::cref(context.searchPath->angle), std::cref(invocation.includeDirectories)}) {
+        for (const auto& directory : list.get()) {
+            bases.insert(comparablePath(absoluteNormal(context.cwd, directory)));
+        }
+    }
+    for (const auto& directory : environmentIncludeDirectories()) {
+        bases.insert(comparablePath(absoluteNormal(context.cwd, directory)));
+    }
+    for (const auto& dependency : entry.dependencies) {
+        bases.insert(comparablePath(absoluteNormal(context.cwd, dependency.path).parent_path()));
+    }
+    std::vector<fs::path> checkedDirectories;
+    for (const auto& place : watched) {
+        const bool exists = fs::exists(place, error);
+        if (exists && fs::last_write_time(place, error) >= started && !error) {
+            return uncacheable(std::format("changed during the compilation: {}", place.generic_string()));
+        }
+        // For a tested header, the nearest directory that still exists on the way to the place, and
+        // its entry on that way: removing a whole directory of tested headers is dated by the one
+        // that held it. The climb stops at the directory the place was formed from (a search,
+        // project or includer directory), which is not itself dated: other jobs of a parallel build
+        // write into such directories, and a place under one usually never existed at all. A
+        // shadowing header that disappears did not win, and changes nothing.
+        fs::path   entryOnPath = comparablePath(place);
+        fs::path   directory   = entryOnPath.parent_path();
+        bool       climbed     = false;
+        const auto generic     = entryOnPath.generic_string();
+        const bool probe       = std::ranges::any_of(tested, [&](const std::string& name) {
+            const std::string suffix = fs::path{name}.generic_string();
+            return generic.ends_with(suffix) && generic.size() > suffix.size() && generic[generic.size() - suffix.size() - 1] == '/';
+        });
+        while (probe && !fs::is_directory(directory, error) && directory.has_relative_path() && !bases.contains(directory)) {
+            entryOnPath = directory;
+            directory   = directory.parent_path();
+            climbed     = true;
+        }
+        if (climbed && (bases.contains(directory) || !fs::is_directory(directory, error))) {
+            continue;
+        }
+        if (std::ranges::contains(outputDirectories, directory)) {
+            if (!fs::exists(entryOnPath, error) && outputEntries.contains(entryOnPath)) {
+                return uncacheable(std::format("removed during the compilation: {}", entryOnPath.generic_string()));
+            }
+            continue;
+        }
+        if (std::ranges::contains(checkedDirectories, directory)) {
+            continue;
+        }
+        checkedDirectories.push_back(directory);
+        if (fs::last_write_time(directory, error) >= started && !error) {
+            return uncacheable(std::format("changed during the compilation: {}", directory.generic_string()));
+        }
     }
     entry.knownShadows = *shadows;
 

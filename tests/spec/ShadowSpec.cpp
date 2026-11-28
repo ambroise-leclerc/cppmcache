@@ -257,4 +257,75 @@ const speclab::Register windowsSpelling{"Shadowing: MSVC spells the files it rea
                                         }};
 #endif
 
+const speclab::Register probedHeaders{
+    "Shadowing: a header tested with __has_include and absent",
+    "unit,shadow",
+    [] {
+        return speclab::Test("SHADOW-010")
+            .Then("every place its name could resolve is a candidate, though no file was read for it",
+                  [] {
+                      const SearchPath path{
+                          {"../quoted"},
+                          {"../include", sdk}
+                      };
+                      const Paths candidates = shadowCandidates(path, {"../include"}, cwd, "../src/m.cpp", {}, {"opt/optional.h", root + "/abs/fixed.h"});
+                      Checks      checks;
+                      checks.expect(contains(candidates, root + "/quoted/opt/optional.h"), "in a quote directory");
+                      checks.expect(contains(candidates, root + "/include/opt/optional.h"), "in a user directory");
+                      checks.expect(contains(candidates, sdk + "/opt/optional.h"), "in a system directory");
+                      checks.expect(contains(candidates, root + "/src/opt/optional.h"), "beside the source");
+                      checks.expect(contains(candidates, root + "/abs/fixed.h"), "an absolute name is its own place");
+                      checks.expect(candidates.size() == 5, "and nowhere else");
+                      checks.raise();
+                  })
+            .Execute();
+    }};
+
+const speclab::Register probedBesideTester{
+    "Shadowing: a header tested from inside a system directory",
+    "unit,shadow",
+    [] {
+        return speclab::Test("SHADOW-011")
+            .Then("a name tested in quotes is also a candidate beside every file read, where a macro could expand the test",
+                  [] {
+                      const SearchPath path{{}, {sdk}};
+                      const Paths      candidates =
+                          shadowCandidates(path, {}, cwd, "../src/m.cpp", {sdk + "/sub/a.h", sdk + "/other/b.h"}, {"flag.h", "angle.h"}, {"flag.h"});
+                      Checks checks;
+                      checks.expect(contains(candidates, sdk + "/sub/flag.h"), "beside the header that defines the test");
+                      checks.expect(contains(candidates, sdk + "/other/flag.h"), "beside another header that could expand it");
+                      checks.expect(contains(candidates, root + "/src/flag.h"), "beside the source");
+                      checks.expect(contains(candidates, sdk + "/flag.h"), "in the search directory");
+                      checks.expect(!contains(candidates, sdk + "/other/angle.h"), "a name tested in angle brackets does not look beside a file");
+                      checks.raise();
+                  })
+            .Execute();
+    }};
+
+#ifndef _WIN32
+// Creating a symbolic link needs a privilege on Windows: the scenario runs elsewhere.
+const speclab::Register probedThroughLink{"Shadowing: a tested name that climbs out of a symbolic link", "unit,shadow", [] {
+                                              return speclab::Test("SHADOW-012")
+                                                  .Then("`..` after a link is also watched where the system resolves it, beside the target",
+                                                        [] {
+                                                            namespace fs       = std::filesystem;
+                                                            const fs::path top = fs::temp_directory_path() / "cppmcache-shadow-012";
+                                                            fs::remove_all(top);
+                                                            fs::create_directories(top / "real" / "sub");
+                                                            fs::create_directory_symlink(top / "real" / "sub", top / "link");
+                                                            const SearchPath path{{}, {top.generic_string()}};
+                                                            const Paths candidates = shadowCandidates(path, {}, cwd, "../src/m.cpp", {}, {"link/../flag.h"});
+                                                            const bool  lexical    = contains(candidates, top.generic_string() + "/flag.h");
+                                                            const bool  resolved   = contains(candidates,
+                                                                                           fs::weakly_canonical(top / "real" / "flag.h").generic_string());
+                                                            fs::remove_all(top);
+                                                            Checks checks;
+                                                            checks.expect(lexical, "where the name reads");
+                                                            checks.expect(resolved, "where the link takes it");
+                                                            checks.raise();
+                                                        })
+                                                  .Execute();
+                                          }};
+#endif
+
 }  // namespace
