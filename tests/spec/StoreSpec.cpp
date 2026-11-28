@@ -239,6 +239,38 @@ const speclab::Register probeForms{"Storage: a test the preprocessor still sees 
                                            .Execute();
                                    }};
 
+const speclab::Register probeAliases{"Storage: a name the operator is given elsewhere is a test the scan cannot follow", "unit,store,shadow", [] {
+                                         return speclab::Test("STORE-009")
+                                             .Then("an alias is reported as unknown, while text that only names the operator is not",
+                                                   [] {
+                                                       const auto alias   = scanHeaderProbes("#define HAS __has_"
+                                                                                             "include\n#if HAS(\"flag.h\")\n#endif\n");
+                                                       const auto guarded = scanHeaderProbes("#ifndef __has_"
+                                                                                             "include\n#elif !defined __has_"
+                                                                                             "include || defined ( __has_"
+                                                                                             "include )\n#endif // __has_"
+                                                                                             "include\n/* __has_"
+                                                                                             "include argument */\n"
+                                                                                             "#error \"the __has_"
+                                                                                             "include check\"\n"
+                                                                                             "const char* raw = R\"x(\" __has_"
+                                                                                             "include )x\";\n"
+                                                                                             "int n = 1'000; char c = '\"'; // __has_"
+                                                                                             "include\n");
+                                                       const auto after   = scanHeaderProbes("int n = 1'0; char q = '\\''; const char* s = \"/*\";\n#if __has_"
+                                                                                             "include(<after.h>)\n#endif\n");
+                                                       Checks     checks;
+                                                       checks.expect(alias.computed, "an alias makes the operand unknown");
+                                                       checks.expect(guarded.names.empty() && !guarded.computed,
+                                                                     "#ifndef, defined, comments, string, raw string and character literals test nothing");
+                                                       checks.expect(
+                                                           after.names == std::vector<std::string>{"after.h"} && !after.computed,
+                                                           "digit separators, escaped quotes and a comment opener in a string do not hide what follows");
+                                                       checks.raise();
+                                                   })
+                                             .Execute();
+                                     }};
+
 const speclab::Register probesMemo{"Storage: the memoised digest keeps the probed headers", "unit,store,shadow", [] {
                                        return speclab::Test<Sandbox>("STORE-007")
                                            .Given("two files old enough to be memoised, one with a literal test and one with a macro operand",

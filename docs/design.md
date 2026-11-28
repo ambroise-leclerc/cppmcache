@@ -52,9 +52,11 @@ object. ccache's direct mode has this limit; cppmcache checks for it.
   and every recorded header are therefore scanned for those tests, and each name they give is a
   candidate in every search and project directory, whichever form it was written in. The scan
   splices lines first and treats a comment as a space, as the preprocessor does; an unterminated
-  comment after the operator counts as a test it cannot read. A test whose name comes from a macro
-  could look anywhere: a compilation that reads one is not stored. The scan does not tell comments
-  from code, so a test that appears only in a comment adds places to watch, never a wrong result.
+  comment after the operator counts as a test it cannot read. The operator named in a comment or a
+  string or character literal is text, and is ignored. A test whose name comes from a macro could
+  look anywhere, and so could the operator under another name (`#define HAS __has_include`): the
+  operator is a test the scan can follow only when a call follows it, or when `#ifdef`, `#ifndef`
+  or `defined` only asks whether it exists. A compilation that reads anything else is not stored.
 - **The check.** A manifest entry records which of those places were occupied when it was made. On
   lookup, the entry is valid only if exactly those are occupied: a file that appears can win an
   include or turn a test true, and one that disappears can turn a test false. The same list is part

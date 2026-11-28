@@ -177,8 +177,68 @@ HeaderProbes scanHeaderProbes(std::string_view raw) {
         }
         return i;
     };
+    // Which characters are code, as opposed to a comment or the inside of a string or character
+    // literal: the operator named there is text, not a test. A header name in quotes is lexed as a
+    // string here, which does not matter, since only the operator's own position is looked up.
+    std::vector<bool> code(content.size(), true);
+    for (std::size_t i = 0; i < content.size();) {
+        const std::string_view rest = std::string_view{content}.substr(i);
+        std::size_t            end  = i;
+        if (rest.starts_with("//")) {
+            end = std::min(content.find('\n', i), content.size());
+        } else if (rest.starts_with("/*")) {
+            const std::size_t close = content.find("*/", i + 2);
+            end                     = close == std::string::npos ? content.size() : close + 2;
+        } else if (rest.front() == '"' || rest.front() == '\'') {
+            // The identifier or number this quote follows, if any: `R`, `u8R`, `LR`… open a raw
+            // string, `u8`, `L`… only prefix a literal, and a quote inside a number separates digits.
+            std::size_t start = i;
+            while (start > 0 && identifier(content[start - 1])) {
+                --start;
+            }
+            const std::string_view before = std::string_view{content}.substr(start, i - start);
+            if (rest.front() == '\'' && !before.empty() && before.front() >= '0' && before.front() <= '9') {
+                ++i;
+                continue;
+            }
+            const bool raw = rest.front() == '"' && (before == "R" || before == "LR" || before == "uR" || before == "UR" || before == "u8R");
+            if (raw) {
+                const std::size_t open       = content.find('(', i + 1);
+                const std::string terminator = open == std::string::npos ? std::string{} : ")" + content.substr(i + 1, open - i - 1) + "\"";
+                const std::size_t close      = open == std::string::npos ? std::string::npos : content.find(terminator, open + 1);
+                end                          = close == std::string::npos ? content.size() : close + terminator.size();
+            } else {
+                end = i + 1;
+                while (end < content.size() && content[end] != rest.front() && content[end] != '\n') {
+                    end += content[end] == '\\' ? 2 : 1;
+                }
+                end = std::min(end + 1, content.size());
+            }
+        } else {
+            ++i;
+            continue;
+        }
+        std::fill(code.begin() + static_cast<std::ptrdiff_t>(i), code.begin() + static_cast<std::ptrdiff_t>(end), false);
+        i = end;
+    }
+    // Whether the text between `lineStart` and `at` ends with `defined` or `defined(`.
+    const auto afterDefined = [&](std::size_t lineStart, std::size_t at) {
+        std::string_view prefix = std::string_view{content}.substr(lineStart, at - lineStart);
+        const auto       trim   = [&] {
+            while (!prefix.empty() && (prefix.back() == ' ' || prefix.back() == '\t')) {
+                prefix.remove_suffix(1);
+            }
+        };
+        trim();
+        if (prefix.ends_with('(')) {
+            prefix.remove_suffix(1);
+            trim();
+        }
+        constexpr std::string_view keyword = "defined";
+        return prefix.ends_with(keyword) && (prefix.size() == keyword.size() || !identifier(prefix[prefix.size() - keyword.size() - 1]));
+    };
     for (std::size_t at = content.find(token); at != std::string::npos; at = content.find(token, at + 1)) {
-        if (at > 0 && identifier(content[at - 1])) {
+        if (!code[at] || (at > 0 && identifier(content[at - 1]))) {
             continue;
         }
         std::size_t i = at + token.size();
@@ -202,6 +262,12 @@ HeaderProbes scanHeaderProbes(std::string_view raw) {
         }
         i = skipSpace(i);
         if (i >= content.size() || content[i] != '(') {
+            // Without a call, the operator is only named. `#ifdef`, `#ifndef` and `defined` ask
+            // whether it exists, and test nothing. Anything else, such as `#define HAS __has_include`,
+            // makes another name a test the scan cannot follow, so the operand is unknown.
+            if (directive != "#ifdef" && directive != "#ifndef" && directive != "#elifdef" && directive != "#elifndef" && !afterDefined(lineStart, at)) {
+                probes.computed = true;
+            }
             continue;
         }
         i                = skipSpace(i + 1);
@@ -317,10 +383,10 @@ public:
         const auto stamp   = std::chrono::duration_cast<std::chrono::nanoseconds>(modified.time_since_epoch()).count();
         const bool settled = fs::file_time_type::clock::now() - modified > std::chrono::seconds{2};
 
-        // "5": records made before header probes were recorded, or by a scan that did not treat a
-        // comment as a space nor splice lines first, are not read.
+        // "6": records made before header probes were recorded, or by a scan that did not treat a
+        // comment as a space, splice lines first, or refuse an alias of the operator, are not read.
         const std::string statKey =
-            KeyHasher{}.field("5").field(absolute.generic_string()).field(std::to_string(size)).field(std::to_string(stamp)).finishHex();
+            KeyHasher{}.field("6").field(absolute.generic_string()).field(std::to_string(size)).field(std::to_string(stamp)).finishHex();
         const fs::path statPath = shard("stat", statKey);
         if (settled) {
             // Record: 64 hexadecimal digits, a space, the time-macro flag, a space, the digest's size,

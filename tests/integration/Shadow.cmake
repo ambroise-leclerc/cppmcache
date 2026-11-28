@@ -226,4 +226,18 @@ build(hit 1)
 file(WRITE "${WORK_DIR}/probe/flag.h" "")
 build(hit 2)
 
+message(STATUS "14. the operator under another name: what it tests cannot be followed, nothing is stored")
+file(WRITE "${WORK_DIR}/src/alias.cpp"
+    "#include <cstdio>\n#define HAS ${has_include}\n#if HAS(\"flag.h\")\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n"
+    "int main() { std::printf(\"%d\\n\", VALUE); }\n")
+file(REMOVE "${WORK_DIR}/probe/flag.h")
+if(FAMILY STREQUAL "msvc")
+    set(compile /nologo /std:c++latest /EHsc /Iprobe /Foout/main.obj /c src/alias.cpp)
+else()
+    set(compile -std=c++23 -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/alias.cpp)
+endif()
+build(uncached 1)
+file(WRITE "${WORK_DIR}/probe/flag.h" "")
+build(uncached 2)
+
 message(STATUS "header shadowing integration test (${FAMILY}) passed")
