@@ -449,13 +449,31 @@ std::optional<std::vector<std::string>> presentShadows(Context& context, const M
             headers.push_back(dependency.path);
         }
     }
+    // The headers the source and those files tested for, found or not: one that was absent can
+    // appear, and change the result of the test, without any file read before having changed.
+    std::vector<fs::path> scanned{context.sourceAbsolute};
+    for (const auto& header : headers) {
+        scanned.push_back(absoluteNormal(context.cwd, header));
+    }
+    std::vector<std::string> probedNames;
+    for (const auto& file : scanned) {
+        const auto info = context.store.fileInfo(file);
+        if (!info || info->computedProbe) {
+            return std::nullopt;
+        }
+        for (const auto& name : info->probedHeaders) {
+            if (!std::ranges::contains(probedNames, name)) {
+                probedNames.push_back(name);
+            }
+        }
+    }
     std::vector<std::string> present;
     std::error_code          error;
     auto                     userDirectories = context.invocation.includeDirectories;
     if (context.kind != CompilerKind::msvc) {
         std::ranges::copy(environmentIncludeDirectories(), std::back_inserter(userDirectories));
     }
-    for (const auto& candidate : shadowCandidates(*context.searchPath, userDirectories, context.cwd, context.invocation.source, headers)) {
+    for (const auto& candidate : shadowCandidates(*context.searchPath, userDirectories, context.cwd, context.invocation.source, headers, probedNames)) {
         const bool regular = fs::is_regular_file(candidate, error);
         if (error && error != std::errc::no_such_file_or_directory && error != std::errc::not_a_directory) {
             context.log("error", "cannot inspect a shadow candidate");
@@ -794,6 +812,16 @@ int compileAndStore(Context& context) {
     // What already sits where a shadowing header would be did not win this compilation. Without
     // the compiler's search path that cannot be told, and the result is not stored: an entry that
     // cannot be checked against a new header must not exist.
+    // A test whose header name a macro supplies could look anywhere: no set of places to watch
+    // covers it, so the result is not stored.
+    if (const auto sourceInfo = store.fileInfo(context.sourceAbsolute); sourceInfo && sourceInfo->computedProbe) {
+        return uncacheable("__has_include with a computed operand in the source");
+    }
+    for (const auto& dependency : entry.dependencies) {
+        if (const auto info = store.fileInfo(absoluteNormal(context.cwd, dependency.path)); info && info->computedProbe) {
+            return uncacheable(std::format("__has_include with a computed operand in {}", dependency.path));
+        }
+    }
     const auto shadows = presentShadows(context, entry);
     if (!shadows) {
         return uncacheable("include search path unknown");

@@ -120,8 +120,9 @@ in [docs/usage.md](docs/usage.md).
 - **No preprocessor pass.** Inputs are read from what the compiler reports: the dependency file and
   module mapping for GCC and Clang, `/sourceDependencies` for MSVC.
 - **Header shadowing is detected.** A header created earlier in the search order than one a unit
-  included changes what the compiler reads without changing any file it read. cppmcache checks the
-  places where such a file would be, and recompiles.
+  included changes what the compiler reads without changing any file it read, and so does a header
+  that a `__has_include` test looked for and did not find. cppmcache checks the places where such a
+  file would be, and recompiles.
 
 The full description is in [docs/design.md](docs/design.md).
 

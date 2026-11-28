@@ -47,6 +47,12 @@ object. ccache's direct mode has this limit; cppmcache checks for it.
   looks first, is a place where a shadowing header would be. Project directories include those
   supplied through the compiler's include-path environment variables. Names relative to project
   directories are also considered, including names containing `..` that leave a search directory.
+- **Tested headers.** A header that `__has_include` or `__has_include_next` looked for and did not
+  find was not read, so no recorded file points to it. The source and every recorded header are
+  therefore scanned for those tests, and each name they give is a candidate in every search and
+  project directory, whichever form it was written in. A test whose name comes from a macro could
+  look anywhere: a compilation that reads one is not stored. The scan does not tell comments from
+  code, so a test that appears only in a comment adds places to watch, never a wrong result.
 - **The check.** A manifest entry records which of those places were already occupied when it was
   made: they did not win then. On lookup, a file in any other of those places invalidates the
   entry, and the unit is compiled again.

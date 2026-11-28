@@ -53,6 +53,8 @@ function(build expected output)
         message(FATAL_ERROR "hit expected, got ${hits} hit(s) and ${misses} miss(es)")
     elseif(expected STREQUAL "miss" AND (NOT hits EQUAL 0 OR NOT misses EQUAL 1))
         message(FATAL_ERROR "miss expected, got ${hits} hit(s) and ${misses} miss(es): a stale object was served")
+    elseif(expected STREQUAL "uncached" AND (NOT hits EQUAL 0 OR NOT misses EQUAL 0))
+        message(FATAL_ERROR "neither a hit nor a stored miss expected, got ${hits} hit(s) and ${misses} miss(es)")
     endif()
     execute_process(COMMAND "${COMPILER}" ${link}
         WORKING_DIRECTORY "${WORK_DIR}" RESULT_VARIABLE status OUTPUT_VARIABLE log ERROR_VARIABLE log)
@@ -162,5 +164,38 @@ build(hit 1)
 file(WRITE "${WORK_DIR}/src/shared/x.h" "#define VALUE 2\n")
 build(miss 2)
 build(hit 2)
+
+message(STATUS "11. a header tested with __has_include, absent, then created: no file read before has changed")
+# The operator's name is split so that this script, were it ever scanned, would test nothing itself.
+set(has_include "__has_include")
+file(MAKE_DIRECTORY "${WORK_DIR}/probe")
+file(WRITE "${WORK_DIR}/src/probe.cpp"
+    "#include <cstdio>\n#if ${has_include}(\"optional.h\")\n#include \"optional.h\"\n#endif\n"
+    "#ifndef VALUE\n#define VALUE 1\n#endif\nint main() { std::printf(\"%d\\n\", VALUE); }\n")
+if(FAMILY STREQUAL "msvc")
+    set(compile /nologo /std:c++latest /EHsc /Iprobe /Foout/main.obj /c src/probe.cpp)
+else()
+    set(compile -std=c++23 -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/probe.cpp)
+endif()
+build(miss 1)
+build(hit 1)
+file(WRITE "${WORK_DIR}/probe/optional.h" "#define VALUE 2\n")
+build(miss 2)
+build(hit 2)
+file(REMOVE "${WORK_DIR}/probe/optional.h")
+build(hit 1)
+
+message(STATUS "12. a header name supplied by a macro: where it would appear cannot be known, nothing is stored")
+file(WRITE "${WORK_DIR}/src/computed.cpp"
+    "#include <cstdio>\n#define NAME \"optional.h\"\n#if ${has_include}(NAME)\n#include NAME\n#endif\n"
+    "#ifndef VALUE\n#define VALUE 1\n#endif\nint main() { std::printf(\"%d\\n\", VALUE); }\n")
+if(FAMILY STREQUAL "msvc")
+    set(compile /nologo /std:c++latest /EHsc /Iprobe /Foout/main.obj /c src/computed.cpp)
+else()
+    set(compile -std=c++23 -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/computed.cpp)
+endif()
+build(uncached 1)
+file(WRITE "${WORK_DIR}/probe/optional.h" "#define VALUE 2\n")
+build(uncached 2)
 
 message(STATUS "header shadowing integration test (${FAMILY}) passed")

@@ -257,4 +257,28 @@ const speclab::Register windowsSpelling{"Shadowing: MSVC spells the files it rea
                                         }};
 #endif
 
+const speclab::Register probedHeaders{
+    "Shadowing: a header tested with __has_include and absent",
+    "unit,shadow",
+    [] {
+        return speclab::Test("SHADOW-010")
+            .Then("every place its name could resolve is a candidate, though no file was read for it",
+                  [] {
+                      const SearchPath path{
+                          {"../quoted"},
+                          {"../include", sdk}
+                      };
+                      const Paths candidates = shadowCandidates(path, {"../include"}, cwd, "../src/m.cpp", {}, {"opt/optional.h", root + "/abs/fixed.h"});
+                      Checks      checks;
+                      checks.expect(contains(candidates, root + "/quoted/opt/optional.h"), "in a quote directory");
+                      checks.expect(contains(candidates, root + "/include/opt/optional.h"), "in a user directory");
+                      checks.expect(contains(candidates, sdk + "/opt/optional.h"), "in a system directory");
+                      checks.expect(contains(candidates, root + "/src/opt/optional.h"), "beside the source");
+                      checks.expect(contains(candidates, root + "/abs/fixed.h"), "an absolute name is its own place");
+                      checks.expect(candidates.size() == 5, "and nowhere else");
+                      checks.raise();
+                  })
+            .Execute();
+    }};
+
 }  // namespace

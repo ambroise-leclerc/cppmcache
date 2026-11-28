@@ -110,7 +110,90 @@ std::optional<std::string> readFile(const fs::path& path) {
 struct FileInfo {
     Digest digest;
     bool   timeMacros = false;  // the content mentions one of the preprocessor's date and time macros
+    // The header names the content tests with `__has_include` or `__has_include_next`, spelt as
+    // written between the quotes or angle brackets. A header that is absent leaves no trace among
+    // the files a compilation read, so these names are what tells the cache where one could appear.
+    std::vector<std::string> probedHeaders;
+    // One of those tests names its header through a macro, so where it looks cannot be known.
+    bool computedProbe = false;
 };
+
+// The header names of `__has_include` and `__has_include_next` tests in `content`. A mention that is
+// not a call, such as `#ifdef __has_include`, `defined(__has_include)` or the `#define` that supplies
+// a fallback, tests nothing. Comments are not told apart from code: a test that appears only in a
+// comment adds a name to watch, which costs a lookup and never a wrong result.
+struct HeaderProbes {
+    std::vector<std::string> names;
+    bool                     computed = false;
+};
+
+HeaderProbes scanHeaderProbes(std::string_view content) {
+    // Split in two so that scanning this file finds nothing.
+    constexpr std::string_view token      = "__has_"
+                                            "include";
+    const auto                 identifier = [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+    };
+    const auto skipSpace = [&](std::size_t i) {
+        while (i < content.size()) {
+            if (content[i] == ' ' || content[i] == '\t') {
+                ++i;
+            } else if (content.substr(i).starts_with("\\\n")) {
+                i += 2;
+            } else if (content.substr(i).starts_with("\\\r\n")) {
+                i += 3;
+            } else {
+                break;
+            }
+        }
+        return i;
+    };
+    HeaderProbes probes;
+    for (std::size_t at = content.find(token); at != std::string_view::npos; at = content.find(token, at + 1)) {
+        if (at > 0 && identifier(content[at - 1])) {
+            continue;
+        }
+        std::size_t i = at + token.size();
+        if (content.substr(i).starts_with("_next")) {
+            i += 5;
+        }
+        if (i < content.size() && identifier(content[i])) {
+            continue;
+        }
+        // `#define __has_include(x) 0` and `#undef __has_include` name the operator; they test nothing.
+        const std::size_t lineStart = content.rfind('\n', at) == std::string_view::npos ? 0 : content.rfind('\n', at) + 1;
+        std::string       directive;
+        for (const char c : content.substr(lineStart, at - lineStart)) {
+            if (c != ' ' && c != '\t') {
+                directive.push_back(c);
+            }
+        }
+        if (directive == "#define" || directive == "#undef") {
+            continue;
+        }
+        i = skipSpace(i);
+        if (i >= content.size() || content[i] != '(') {
+            continue;
+        }
+        i                = skipSpace(i + 1);
+        const char open  = i < content.size() ? content[i] : '\0';
+        const char close = open == '"' ? '"' : open == '<' ? '>' : '\0';
+        if (close == '\0') {
+            probes.computed = true;
+            continue;
+        }
+        const std::size_t end = content.find_first_of(std::string{close, '\n'}, i + 1);
+        if (end == std::string_view::npos || content[end] != close || end == i + 1) {
+            probes.computed = true;
+            continue;
+        }
+        const std::string name{content.substr(i + 1, end - i - 1)};
+        if (!std::ranges::contains(probes.names, name)) {
+            probes.names.push_back(name);
+        }
+    }
+    return probes;
+}
 
 class Store {
 public:
@@ -205,19 +288,34 @@ public:
         const auto stamp   = std::chrono::duration_cast<std::chrono::nanoseconds>(modified.time_since_epoch()).count();
         const bool settled = fs::file_time_type::clock::now() - modified > std::chrono::seconds{2};
 
+        // "4": records made before header probes were recorded do not hold them, and are not read.
         const std::string statKey =
-            KeyHasher{}.field("3").field(absolute.generic_string()).field(std::to_string(size)).field(std::to_string(stamp)).finishHex();
+            KeyHasher{}.field("4").field(absolute.generic_string()).field(std::to_string(size)).field(std::to_string(stamp)).finishHex();
         const fs::path statPath = shard("stat", statKey);
         if (settled) {
-            // Record: 64 hexadecimal digits, a space, the time-macro flag, a space, the digest's size.
+            // Record: 64 hexadecimal digits, a space, the time-macro flag, a space, the digest's size,
+            // a space and the computed-probe flag; then one probed header name per line.
             if (const auto cached = readFile(statPath); cached && cached->size() > 67 && (*cached)[64] == ' ' && (*cached)[66] == ' ') {
+                const std::string_view record     = *cached;
+                const std::size_t      firstEnd   = std::min(record.find('\n'), record.size());
+                const std::string_view first      = record.substr(0, firstEnd);
                 std::int64_t           digestSize = 0;
-                const std::string_view digits     = std::string_view{*cached}.substr(67);
-                if (std::from_chars(digits.data(), digits.data() + digits.size(), digestSize).ec == std::errc{}) {
-                    return FileInfo{
-                        Digest{cached->substr(0, 64), digestSize},
-                        (*cached)[65] == '1'
-                    };
+                const std::string_view digits     = first.substr(67);
+                const auto [sizeEnd, sizeError]   = std::from_chars(digits.data(), digits.data() + digits.size(), digestSize);
+                const std::string_view rest       = digits.substr(static_cast<std::size_t>(sizeEnd - digits.data()));
+                if (sizeError == std::errc{} && rest.size() == 2 && rest[0] == ' ' && (rest[1] == '0' || rest[1] == '1')) {
+                    FileInfo info;
+                    info.digest        = Digest{cached->substr(0, 64), digestSize};
+                    info.timeMacros    = (*cached)[65] == '1';
+                    info.computedProbe = rest[1] == '1';
+                    if (firstEnd < record.size()) {
+                        for (const auto line : std::views::split(record.substr(firstEnd + 1), '\n')) {
+                            if (!line.empty()) {
+                                info.probedHeaders.emplace_back(line.begin(), line.end());
+                            }
+                        }
+                    }
+                    return info;
                 }
             }
         }
@@ -239,9 +337,17 @@ public:
                                                "ME__")
                           || content->contains("__TIME"
                                                "STAMP__");
+        auto probes        = scanHeaderProbes(*content);
+        info.probedHeaders = std::move(probes.names);
+        info.computedProbe = probes.computed;
         // Not memoised if the file changed size while it was being read.
         if (settled && content->size() == size) {
-            writeAtomic(statPath, std::format("{} {} {}", info.digest.hash, info.timeMacros ? '1' : '0', info.digest.size));
+            std::string record = std::format("{} {} {} {}", info.digest.hash, info.timeMacros ? '1' : '0', info.digest.size, info.computedProbe ? '1' : '0');
+            for (const auto& name : info.probedHeaders) {
+                record += '\n';
+                record += name;
+            }
+            writeAtomic(statPath, record);
         }
         return info;
     }

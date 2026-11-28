@@ -752,11 +752,17 @@ std::vector<std::string> searchPathProbe(const Invocation& invocation, const std
 // The name an include directive used is not known, so every directory that contains the file gives
 // a hypothesis. A candidate that already exists and did not win is harmless: the caller records
 // which ones existed when the entry was made, and only a new one invalidates it.
+//
+// `probedNames` are the header names tested with `__has_include` or `__has_include_next`. A test that
+// failed read no file, so nothing among `dependencies` says where its header would be: it would be
+// found wherever its name resolves in any searched or project directory, and every such place is a
+// candidate. That is wider than the compiler's own lookup for the form written, never narrower.
 std::vector<std::string> shadowCandidates(const SearchPath&               searchPath,
                                           const std::vector<std::string>& userDirectories,
                                           const fs::path&                 cwd,
                                           const std::string&              source,
-                                          const std::vector<std::string>& dependencies) {
+                                          const std::vector<std::string>& dependencies,
+                                          const std::vector<std::string>& probedNames = {}) {
     // Every path is made comparable first: on Windows the compiler's report and the command line
     // do not spell a directory the same way.
     const auto absolute = [&](const std::string& path) {
@@ -843,6 +849,18 @@ std::vector<std::string> shadowCandidates(const SearchPath&               search
                         candidates.insert(candidate.generic_string());
                     }
                 }
+            }
+        }
+    }
+    for (const auto& probed : probedNames) {
+        const fs::path name{probed};
+        if (name.is_absolute()) {
+            candidates.insert(comparablePath(name).generic_string());
+            continue;
+        }
+        for (const auto& directories : {std::cref(ordered), std::cref(projectDirectories)}) {
+            for (const auto& directory : directories.get()) {
+                candidates.insert(comparablePath(directory / name).generic_string());
             }
         }
     }
