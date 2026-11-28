@@ -60,7 +60,10 @@ object. ccache's direct mode has this limit; cppmcache checks for it.
   no other trace), means the state the compiler saw is unknown, and nothing is stored. Writing the
   outputs changes the date of the directories that receive them, so those are listed before the
   compiler runs, and a watched file that was in that listing and is gone afterwards counts as
-  removed during the compilation. The scan works on preprocessing tokens, as the compiler forms them: lines are spliced
+  removed during the compilation. When a tested header's directory is gone too, the nearest
+  directory that remains is dated instead, up to, but not including, the search, project or
+  includer directory the place was formed from: other jobs of a parallel build write into those,
+  so the removal of a whole first-level subdirectory of one while the compiler runs is not seen. The scan works on preprocessing tokens, as the compiler forms them: lines are spliced
   first, a comment is a space,
   a string or character literal is one token, and so is a header name after `#include` or
   `__has_include(`, where `//` and `/*` are characters of the name. An unterminated comment or raw

@@ -362,6 +362,18 @@ if(NOT FAMILY STREQUAL "msvc")
     set(COMPILER "${wrapper}")
     build(uncached 2)
     set(COMPILER "${real_compiler}")
+    # And the removal of the whole directory that held it.
+    file(REMOVE "${WORK_DIR}/out/flag.h")
+    file(MAKE_DIRECTORY "${WORK_DIR}/nest/deep/er")
+    file(WRITE "${WORK_DIR}/nest/deep/er/flag.h" "")
+    file(WRITE "${WORK_DIR}/src/nested.cpp"
+        "#include <cstdio>\n#if ${has_include}(\"deep/er/flag.h\")\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n"
+        "int main() { std::printf(\"%d\\n\", VALUE); }\n")
+    file(WRITE "${wrapper}" "#!/bin/sh\n\"${real_compiler}\" \"$@\" || exit $?\ncase \" $* \" in *\" src/nested.cpp \"*) rm -rf nest/deep/er ;; esac\n")
+    set(compile -std=c++23 -Inest -MD -MF out/main.o.d -o out/main.o -c src/nested.cpp)
+    set(COMPILER "${wrapper}")
+    build(uncached 2)
+    set(COMPILER "${real_compiler}")
 
     message(STATUS "18. trigraphs replaced before lines are spliced: nothing is stored")
     string(REPLACE "include" "??/\ninclude" trigraph "${has_include}")

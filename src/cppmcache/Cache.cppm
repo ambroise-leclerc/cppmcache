@@ -472,8 +472,11 @@ bool spelledByPieces(std::string_view name, const std::vector<std::string>& piec
 // The files that exist now where a header shadowing one of the entry's dependencies would be, in
 // the form a manifest records them. Nothing if the search path of the compiler is unknown, or if a
 // `__has_include` test could look where no candidate is; `obstacle` then says which.
-std::optional<std::vector<std::string>>
-presentShadows(Context& context, const ManifestEntry& entry, std::string* obstacle = nullptr, std::vector<fs::path>* watched = nullptr) {
+std::optional<std::vector<std::string>> presentShadows(Context&                  context,
+                                                       const ManifestEntry&      entry,
+                                                       std::string*              obstacle = nullptr,
+                                                       std::vector<fs::path>*    watched  = nullptr,
+                                                       std::vector<std::string>* tested   = nullptr) {
     const auto refuse = [&](std::string reason) -> std::optional<std::vector<std::string>> {
         if (obstacle != nullptr) {
             *obstacle = std::move(reason);
@@ -571,6 +574,9 @@ presentShadows(Context& context, const ManifestEntry& entry, std::string* obstac
     // spell it end to end.
     if (!joins.empty() && (spelledByPieces(hasIncludeName, pieces) || spelledByPieces(hasIncludeNextName, pieces))) {
         return refuse(std::format("__has_include may be built by token pasting, in {}", joins));
+    }
+    if (tested != nullptr) {
+        *tested = probedNames;
     }
     std::vector<std::string> present;
     std::error_code          error;
@@ -947,9 +953,10 @@ int compileAndStore(Context& context) {
     // cannot be checked against a new header must not exist.
     // A test whose header name a macro supplies, or whose operator is built or renamed, could look
     // anywhere: no set of places to watch covers it, so the result is not stored.
-    std::string           obstacle;
-    std::vector<fs::path> watched;
-    const auto            shadows = presentShadows(context, entry, &obstacle, &watched);
+    std::string              obstacle;
+    std::vector<fs::path>    watched;
+    std::vector<std::string> tested;
+    const auto               shadows = presentShadows(context, entry, &obstacle, &watched, &tested);
     if (!shadows) {
         return uncacheable(obstacle);
     }
@@ -957,16 +964,49 @@ int compileAndStore(Context& context) {
     // while the compiler ran may not be in the state it saw. A file present is dated; a removal is
     // dated by its directory, or, in a directory that receives the outputs, told by the listing made
     // before the compiler ran.
+    std::set<fs::path> bases{comparablePath(context.sourceAbsolute.parent_path())};
+    for (const auto& list : {std::cref(context.searchPath->quote), std::cref(context.searchPath->angle), std::cref(invocation.includeDirectories)}) {
+        for (const auto& directory : list.get()) {
+            bases.insert(comparablePath(absoluteNormal(context.cwd, directory)));
+        }
+    }
+    for (const auto& directory : environmentIncludeDirectories()) {
+        bases.insert(comparablePath(absoluteNormal(context.cwd, directory)));
+    }
+    for (const auto& dependency : entry.dependencies) {
+        bases.insert(comparablePath(absoluteNormal(context.cwd, dependency.path).parent_path()));
+    }
     std::vector<fs::path> checkedDirectories;
     for (const auto& place : watched) {
         const bool exists = fs::exists(place, error);
         if (exists && fs::last_write_time(place, error) >= started && !error) {
             return uncacheable(std::format("changed during the compilation: {}", place.generic_string()));
         }
-        const fs::path directory = comparablePath(place).parent_path();
+        // For a tested header, the nearest directory that still exists on the way to the place, and
+        // its entry on that way: removing a whole directory of tested headers is dated by the one
+        // that held it. The climb stops at the directory the place was formed from (a search,
+        // project or includer directory), which is not itself dated: other jobs of a parallel build
+        // write into such directories, and a place under one usually never existed at all. A
+        // shadowing header that disappears did not win, and changes nothing.
+        fs::path   entryOnPath = comparablePath(place);
+        fs::path   directory   = entryOnPath.parent_path();
+        bool       climbed     = false;
+        const auto generic     = entryOnPath.generic_string();
+        const bool probe       = std::ranges::any_of(tested, [&](const std::string& name) {
+            const std::string suffix = fs::path{name}.generic_string();
+            return generic.ends_with(suffix) && generic.size() > suffix.size() && generic[generic.size() - suffix.size() - 1] == '/';
+        });
+        while (probe && !fs::is_directory(directory, error) && directory.has_relative_path() && !bases.contains(directory)) {
+            entryOnPath = directory;
+            directory   = directory.parent_path();
+            climbed     = true;
+        }
+        if (climbed && (bases.contains(directory) || !fs::is_directory(directory, error))) {
+            continue;
+        }
         if (std::ranges::contains(outputDirectories, directory)) {
-            if (!exists && outputEntries.contains(comparablePath(place))) {
-                return uncacheable(std::format("removed during the compilation: {}", place.generic_string()));
+            if (!fs::exists(entryOnPath, error) && outputEntries.contains(entryOnPath)) {
+                return uncacheable(std::format("removed during the compilation: {}", entryOnPath.generic_string()));
             }
             continue;
         }
@@ -974,7 +1014,7 @@ int compileAndStore(Context& context) {
             continue;
         }
         checkedDirectories.push_back(directory);
-        if (fs::is_directory(directory, error) && fs::last_write_time(directory, error) >= started && !error) {
+        if (fs::last_write_time(directory, error) >= started && !error) {
             return uncacheable(std::format("changed during the compilation: {}", directory.generic_string()));
         }
     }
