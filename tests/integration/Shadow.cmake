@@ -354,6 +354,14 @@ if(NOT FAMILY STREQUAL "msvc")
         set(COMPILER "${real_compiler}")
     endforeach()
     file(REMOVE "${WORK_DIR}/probe/flag.h")
+    # The same removal from the directory that also receives the object, whose date the object
+    # changes anyway.
+    file(WRITE "${WORK_DIR}/out/flag.h" "")
+    file(WRITE "${wrapper}" "#!/bin/sh\n\"${real_compiler}\" \"$@\" || exit $?\ncase \" $* \" in *\" src/race.cpp \"*) rm -f out/flag.h ;; esac\n")
+    set(compile -std=c++23 -Iout -MD -MF out/main.o.d -o out/main.o -c src/race.cpp)
+    set(COMPILER "${wrapper}")
+    build(uncached 2)
+    set(COMPILER "${real_compiler}")
 
     message(STATUS "18. trigraphs replaced before lines are spliced: nothing is stored")
     string(REPLACE "include" "??/\ninclude" trigraph "${has_include}")

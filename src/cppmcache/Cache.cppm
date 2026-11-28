@@ -799,6 +799,26 @@ int compileAndStore(Context& context) {
         before[name] = stateOf(file);
     }
 
+    // Writing the outputs changes the dates of the directories that receive them, so the date of
+    // such a directory cannot reveal a tested header removed from it while the compiler runs: what
+    // they hold is listed beforehand instead.
+    std::vector<fs::path> outputDirectories;
+    for (const std::string& output : {invocation.object, invocation.depfile, invocation.moduleOutput}) {
+        if (!output.empty()) {
+            if (const fs::path directory = comparablePath(absoluteNormal(context.cwd, output).parent_path());
+                !std::ranges::contains(outputDirectories, directory)) {
+                outputDirectories.push_back(directory);
+            }
+        }
+    }
+    std::set<fs::path> outputEntries;
+    for (const auto& directory : outputDirectories) {
+        std::error_code listing;
+        for (fs::directory_iterator item{directory, listing}; !listing && item != fs::directory_iterator{}; item.increment(listing)) {
+            outputEntries.insert(comparablePath(item->path()));
+        }
+    }
+
     const auto        started        = fs::file_time_type::clock::now();
     const int         exitCode       = executeCaptured(commandLine, capturedOutput, capturedError);
     const std::string standardOutput = readFile(capturedOutput).value_or("");
@@ -935,21 +955,22 @@ int compileAndStore(Context& context) {
     }
     // The places are inspected after the compilation: a file that appeared there, changed or left
     // while the compiler ran may not be in the state it saw. A file present is dated; a removal is
-    // only dated by its directory. The directories this compilation writes its outputs into change
-    // anyway, and are left out.
-    std::vector<fs::path> outputDirectories;
-    for (const std::string& output : {invocation.object, invocation.depfile, invocation.moduleOutput}) {
-        if (!output.empty()) {
-            outputDirectories.push_back(absoluteNormal(context.cwd, output).parent_path());
-        }
-    }
+    // dated by its directory, or, in a directory that receives the outputs, told by the listing made
+    // before the compiler ran.
     std::vector<fs::path> checkedDirectories;
     for (const auto& place : watched) {
-        if (fs::exists(place, error) && fs::last_write_time(place, error) >= started && !error) {
+        const bool exists = fs::exists(place, error);
+        if (exists && fs::last_write_time(place, error) >= started && !error) {
             return uncacheable(std::format("changed during the compilation: {}", place.generic_string()));
         }
-        const fs::path directory = fs::path{place}.lexically_normal().parent_path();
-        if (std::ranges::contains(checkedDirectories, directory) || std::ranges::contains(outputDirectories, directory)) {
+        const fs::path directory = comparablePath(place).parent_path();
+        if (std::ranges::contains(outputDirectories, directory)) {
+            if (!exists && outputEntries.contains(comparablePath(place))) {
+                return uncacheable(std::format("removed during the compilation: {}", place.generic_string()));
+            }
+            continue;
+        }
+        if (std::ranges::contains(checkedDirectories, directory)) {
             continue;
         }
         checkedDirectories.push_back(directory);

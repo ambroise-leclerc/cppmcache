@@ -57,8 +57,10 @@ object. ccache's direct mode has this limit; cppmcache checks for it.
   (format version 7). A dependency with a BMI's extension is skipped only if it is binary, as a BMI
   is: a textual header so named is scanned. After the compilation, a file at one of the watched
   places that is newer than its start, or a watched directory that changed since (a removal leaves
-  no other trace), means the state the compiler saw is unknown, and nothing is stored; the
-  directories that receive the outputs are left out, since writing them changes their date. The scan works on preprocessing tokens, as the compiler forms them: lines are spliced
+  no other trace), means the state the compiler saw is unknown, and nothing is stored. Writing the
+  outputs changes the date of the directories that receive them, so those are listed before the
+  compiler runs, and a watched file that was in that listing and is gone afterwards counts as
+  removed during the compilation. The scan works on preprocessing tokens, as the compiler forms them: lines are spliced
   first, a comment is a space,
   a string or character literal is one token, and so is a header name after `#include` or
   `__has_include(`, where `//` and `/*` are characters of the name. An unterminated comment or raw
