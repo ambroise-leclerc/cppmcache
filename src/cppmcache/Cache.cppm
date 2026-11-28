@@ -39,7 +39,9 @@ struct ManifestEntry {
     std::vector<Import>      imports;
     std::vector<std::string> provides;
     // Files that existed, when the entry was made, where a header shadowing one of the dependencies
-    // would be: they did not win then. Any other file found in such a place invalidates the entry.
+    // would be, or where a header tested with __has_include would be found. The entry is valid only
+    // while exactly these exist there: one that appears can win an include or turn a test true, and
+    // one that disappears can turn a test false without being a dependency.
     std::vector<std::string> knownShadows;
 
     friend bool operator==(const ManifestEntry&, const ManifestEntry&) = default;
@@ -229,6 +231,13 @@ struct Context {
         }
         for (const auto& import : entry.imports) {
             tree.add("bmi/" + import.name, import.digest);
+        }
+        // Whether a tested header exists changes the object without changing any dependency: two
+        // entries that differ only there must not share an ActionResult. Only existence matters, so
+        // each such file is an empty entry of the tree.
+        static const Digest present = digestOf("");
+        for (const auto& path : entry.knownShadows) {
+            tree.add("present/" + treePath(path), present);
         }
         Action result{digestOf(fullCommand(entry).encode()), tree.rootDigest(), platform};
         Digest digest = digestOf(result.encode());
@@ -508,11 +517,15 @@ bool entryMatches(Context& context, const ManifestEntry& entry) {
         return false;
     }
     // Every recorded file is unchanged. A header created since, earlier in the search order, would
-    // still change what the compiler reads: the entry is only valid if no such file has appeared.
+    // still change what the compiler reads, and a tested header created or removed would change the
+    // result of the test: the entry is only valid if exactly the recorded files exist there.
     const auto present = presentShadows(context, entry);
-    return present && std::ranges::all_of(*present, [&](const std::string& path) {
-               return std::ranges::contains(entry.knownShadows, path);
-           });
+    if (!present) {
+        return false;
+    }
+    auto known = entry.knownShadows;
+    std::ranges::sort(known);
+    return *present == known;
 }
 
 // Restores the outputs recorded for a matching entry. What the local store lacks is fetched from

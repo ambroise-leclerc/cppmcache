@@ -198,4 +198,32 @@ build(uncached 1)
 file(WRITE "${WORK_DIR}/probe/optional.h" "#define VALUE 2\n")
 build(uncached 2)
 
+message(STATUS "13. a header only tested, never included: it appears, then disappears, and each state has its own result")
+# The test is written as GCC and Clang accept it, through a comment and a spliced line, which the
+# scan must see as the preprocessor does. MSVC gets the plain form.
+if(FAMILY STREQUAL "msvc")
+    set(test "${has_include}(\"flag.h\")")
+else()
+    string(REPLACE "include" "\\\ninclude" spliced "${has_include}")
+    set(test "${spliced} /* a comment */ (\"flag.h\")")
+endif()
+file(WRITE "${WORK_DIR}/src/flag.cpp"
+    "#include <cstdio>\n#if ${test}\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n"
+    "int main() { std::printf(\"%d\\n\", VALUE); }\n")
+file(REMOVE "${WORK_DIR}/probe/optional.h")
+if(FAMILY STREQUAL "msvc")
+    set(compile /nologo /std:c++latest /EHsc /Iprobe /Foout/main.obj /c src/flag.cpp)
+else()
+    set(compile -std=c++23 -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/flag.cpp)
+endif()
+build(miss 1)
+build(hit 1)
+file(WRITE "${WORK_DIR}/probe/flag.h" "")
+build(miss 2)
+build(hit 2)
+file(REMOVE "${WORK_DIR}/probe/flag.h")
+build(hit 1)
+file(WRITE "${WORK_DIR}/probe/flag.h" "")
+build(hit 2)
+
 message(STATUS "header shadowing integration test (${FAMILY}) passed")

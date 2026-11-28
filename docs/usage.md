@@ -153,8 +153,8 @@ cmake --install build --prefix ~/.local
   [design.md](design.md#header-shadowing)). The detection covers the directories of the search path
   and those of the project's own files. It does not cover a header added inside the toolchain's
   directories next to a toolchain header that includes it with quotes, nor macOS frameworks. A
-  header that `__has_include` looked for and did not find is detected in the same places when it
-  appears.
+  header that `__has_include` tests is detected in the same places when it appears or disappears,
+  whether or not the unit includes it.
 - Not cached: coverage and profiling builds, `-gsplit-dwarf`, header units, `-MMD`, Clang's
   two-phase `--precompile`, units that use `__DATE__` or `__TIME__`, units that read a
   `__has_include` test whose header name comes from a macro, and linking.

@@ -211,6 +211,34 @@ const speclab::Register headerProbes{"Storage: the headers a file tests for with
                                              .Execute();
                                      }};
 
+const speclab::Register probeForms{"Storage: a test the preprocessor still sees through comments and spliced lines", "unit,store,shadow", [] {
+                                       return speclab::Test("STORE-008")
+                                           .Then("comments count as spaces and lines are spliced before the operator is looked for",
+                                                 [] {
+                                                     const auto commented = scanHeaderProbes("#if __has_"
+                                                                                             "include /**/ ( /* a\n b */ \"one.h\")\n"
+                                                                                             "#endif\n");
+                                                     const auto spliced   = scanHeaderProbes("#if __has_\\\n"
+                                                                                             "include(<two.h>) || __has_\\  \r\n"
+                                                                                             "include_next(\"thr\\\nee.h\")\n"
+                                                                                             "#endif\n");
+                                                     const auto lineEnd   = scanHeaderProbes("#if defined __has_"
+                                                                                             "include // (\"not.h\")\n"
+                                                                                             "#endif\n");
+                                                     const auto open      = scanHeaderProbes("#if __has_"
+                                                                                             "include /* (\"four.h\")\n");
+                                                     Checks     checks;
+                                                     checks.expect(commented.names == std::vector<std::string>{"one.h"} && !commented.computed,
+                                                                   "a block comment, even over two lines, separates the operator from its operand");
+                                                     checks.expect(spliced.names == std::vector<std::string>{"two.h", "three.h"} && !spliced.computed,
+                                                                   "a backslash-newline inside the name, after spaces, or inside the operand, is spliced");
+                                                     checks.expect(lineEnd.names.empty() && !lineEnd.computed, "a line comment ends the directive");
+                                                     checks.expect(open.computed, "an unterminated block comment is treated as unknown");
+                                                     checks.raise();
+                                                 })
+                                           .Execute();
+                                   }};
+
 const speclab::Register probesMemo{"Storage: the memoised digest keeps the probed headers", "unit,store,shadow", [] {
                                        return speclab::Test<Sandbox>("STORE-007")
                                            .Given("two files old enough to be memoised, one with a literal test and one with a macro operand",

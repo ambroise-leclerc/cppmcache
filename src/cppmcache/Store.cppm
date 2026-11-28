@@ -127,43 +127,72 @@ struct HeaderProbes {
     bool                     computed = false;
 };
 
-HeaderProbes scanHeaderProbes(std::string_view content) {
+HeaderProbes scanHeaderProbes(std::string_view raw) {
     // Split in two so that scanning this file finds nothing.
-    constexpr std::string_view token      = "__has_"
-                                            "include";
-    const auto                 identifier = [](char c) {
+    constexpr std::string_view token = "__has_"
+                                       "include";
+    // Line splicing comes before tokenisation: a backslash ending a line can fall inside the
+    // operator's name or its operand. GCC and Clang also splice when spaces follow the backslash.
+    std::string content;
+    content.reserve(raw.size());
+    for (std::size_t i = 0; i < raw.size(); ++i) {
+        if (raw[i] == '\\') {
+            std::size_t next = i + 1;
+            while (next < raw.size() && (raw[next] == ' ' || raw[next] == '\t')) {
+                ++next;
+            }
+            if (next < raw.size() && raw[next] == '\r') {
+                ++next;
+            }
+            if (next < raw.size() && raw[next] == '\n') {
+                i = next;
+                continue;
+            }
+        }
+        content.push_back(raw[i]);
+    }
+    const auto identifier = [](char c) {
         return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
     };
+    HeaderProbes probes;
+    // Skips what separates tokens within a line, comments included: a comment is a space to the
+    // preprocessor. An unterminated block comment leaves nothing the scan can trust.
     const auto skipSpace = [&](std::size_t i) {
         while (i < content.size()) {
-            if (content[i] == ' ' || content[i] == '\t') {
+            const std::string_view rest = std::string_view{content}.substr(i);
+            if (rest.front() == ' ' || rest.front() == '\t' || rest.front() == '\v' || rest.front() == '\f') {
                 ++i;
-            } else if (content.substr(i).starts_with("\\\n")) {
-                i += 2;
-            } else if (content.substr(i).starts_with("\\\r\n")) {
-                i += 3;
+            } else if (rest.starts_with("/*")) {
+                const std::size_t end = content.find("*/", i + 2);
+                if (end == std::string::npos) {
+                    probes.computed = true;
+                    return content.size();
+                }
+                i = end + 2;
+            } else if (rest.starts_with("//")) {
+                i = std::min(content.find('\n', i), content.size());
             } else {
                 break;
             }
         }
         return i;
     };
-    HeaderProbes probes;
-    for (std::size_t at = content.find(token); at != std::string_view::npos; at = content.find(token, at + 1)) {
+    for (std::size_t at = content.find(token); at != std::string::npos; at = content.find(token, at + 1)) {
         if (at > 0 && identifier(content[at - 1])) {
             continue;
         }
         std::size_t i = at + token.size();
-        if (content.substr(i).starts_with("_next")) {
+        if (std::string_view{content}.substr(i).starts_with("_next")) {
             i += 5;
         }
         if (i < content.size() && identifier(content[i])) {
             continue;
         }
         // `#define __has_include(x) 0` and `#undef __has_include` name the operator; they test nothing.
-        const std::size_t lineStart = content.rfind('\n', at) == std::string_view::npos ? 0 : content.rfind('\n', at) + 1;
+        const std::size_t newline   = at == 0 ? std::string::npos : content.rfind('\n', at - 1);
+        const std::size_t lineStart = newline == std::string::npos ? 0 : newline + 1;
         std::string       directive;
-        for (const char c : content.substr(lineStart, at - lineStart)) {
+        for (const char c : std::string_view{content}.substr(lineStart, at - lineStart)) {
             if (c != ' ' && c != '\t') {
                 directive.push_back(c);
             }
@@ -183,11 +212,11 @@ HeaderProbes scanHeaderProbes(std::string_view content) {
             continue;
         }
         const std::size_t end = content.find_first_of(std::string{close, '\n'}, i + 1);
-        if (end == std::string_view::npos || content[end] != close || end == i + 1) {
+        if (end == std::string::npos || content[end] != close || end == i + 1) {
             probes.computed = true;
             continue;
         }
-        const std::string name{content.substr(i + 1, end - i - 1)};
+        const std::string name = content.substr(i + 1, end - i - 1);
         if (!std::ranges::contains(probes.names, name)) {
             probes.names.push_back(name);
         }
@@ -288,9 +317,10 @@ public:
         const auto stamp   = std::chrono::duration_cast<std::chrono::nanoseconds>(modified.time_since_epoch()).count();
         const bool settled = fs::file_time_type::clock::now() - modified > std::chrono::seconds{2};
 
-        // "4": records made before header probes were recorded do not hold them, and are not read.
+        // "5": records made before header probes were recorded, or by a scan that did not treat a
+        // comment as a space nor splice lines first, are not read.
         const std::string statKey =
-            KeyHasher{}.field("4").field(absolute.generic_string()).field(std::to_string(size)).field(std::to_string(stamp)).finishHex();
+            KeyHasher{}.field("5").field(absolute.generic_string()).field(std::to_string(size)).field(std::to_string(stamp)).finishHex();
         const fs::path statPath = shard("stat", statKey);
         if (settled) {
             // Record: 64 hexadecimal digits, a space, the time-macro flag, a space, the digest's size,
