@@ -472,7 +472,8 @@ bool spelledByPieces(std::string_view name, const std::vector<std::string>& piec
 // The files that exist now where a header shadowing one of the entry's dependencies would be, in
 // the form a manifest records them. Nothing if the search path of the compiler is unknown, or if a
 // `__has_include` test could look where no candidate is; `obstacle` then says which.
-std::optional<std::vector<std::string>> presentShadows(Context& context, const ManifestEntry& entry, std::string* obstacle = nullptr) {
+std::optional<std::vector<std::string>>
+presentShadows(Context& context, const ManifestEntry& entry, std::string* obstacle = nullptr, std::vector<fs::path>* watched = nullptr) {
     const auto refuse = [&](std::string reason) -> std::optional<std::vector<std::string>> {
         if (obstacle != nullptr) {
             *obstacle = std::move(reason);
@@ -482,13 +483,22 @@ std::optional<std::vector<std::string>> presentShadows(Context& context, const M
     if (!ensureSearchPath(context)) {
         return refuse("include search path unknown");
     }
+    // An imported BMI is recorded as a dependency; nothing shadows it and it tests nothing. Its
+    // extension is not enough to tell it, since a textual header could share it: it must also be
+    // binary, which a header is not.
     std::vector<std::string> headers;
     for (const auto& dependency : entry.dependencies) {
         const std::string extension = fs::path{dependency.path}.extension().string();
-        // An indirectly imported BMI is recorded as a dependency; nothing shadows it.
-        if (extension != ".gcm" && extension != ".bmi" && extension != ".pcm" && extension != ".ifc") {
-            headers.push_back(dependency.path);
+        if (extension == ".gcm" || extension == ".bmi" || extension == ".pcm" || extension == ".ifc") {
+            const auto info = context.store.fileInfo(absoluteNormal(context.cwd, dependency.path));
+            if (!info) {
+                return refuse(std::format("unreadable file: {}", dependency.path));
+            }
+            if (info->binary) {
+                continue;
+            }
         }
+        headers.push_back(dependency.path);
     }
     // The headers the source and those files tested for, found or not: one that was absent can
     // appear, and change the result of the test, without any file read before having changed.
@@ -570,6 +580,9 @@ std::optional<std::vector<std::string>> presentShadows(Context& context, const M
     }
     for (const auto& candidate :
          shadowCandidates(*context.searchPath, userDirectories, context.cwd, context.invocation.source, headers, probedNames, quotedNames)) {
+        if (watched != nullptr) {
+            watched->emplace_back(candidate);
+        }
         const bool regular = fs::is_regular_file(candidate, error);
         if (error && error != std::errc::no_such_file_or_directory && error != std::errc::not_a_directory) {
             context.log("error", "cannot inspect a shadow candidate");
@@ -914,10 +927,35 @@ int compileAndStore(Context& context) {
     // cannot be checked against a new header must not exist.
     // A test whose header name a macro supplies, or whose operator is built or renamed, could look
     // anywhere: no set of places to watch covers it, so the result is not stored.
-    std::string obstacle;
-    const auto  shadows = presentShadows(context, entry, &obstacle);
+    std::string           obstacle;
+    std::vector<fs::path> watched;
+    const auto            shadows = presentShadows(context, entry, &obstacle, &watched);
     if (!shadows) {
         return uncacheable(obstacle);
+    }
+    // The places are inspected after the compilation: a file that appeared there, changed or left
+    // while the compiler ran may not be in the state it saw. A file present is dated; a removal is
+    // only dated by its directory. The directories this compilation writes its outputs into change
+    // anyway, and are left out.
+    std::vector<fs::path> outputDirectories;
+    for (const std::string& output : {invocation.object, invocation.depfile, invocation.moduleOutput}) {
+        if (!output.empty()) {
+            outputDirectories.push_back(absoluteNormal(context.cwd, output).parent_path());
+        }
+    }
+    std::vector<fs::path> checkedDirectories;
+    for (const auto& place : watched) {
+        if (fs::exists(place, error) && fs::last_write_time(place, error) >= started && !error) {
+            return uncacheable(std::format("changed during the compilation: {}", place.generic_string()));
+        }
+        const fs::path directory = fs::path{place}.lexically_normal().parent_path();
+        if (std::ranges::contains(checkedDirectories, directory) || std::ranges::contains(outputDirectories, directory)) {
+            continue;
+        }
+        checkedDirectories.push_back(directory);
+        if (fs::is_directory(directory, error) && fs::last_write_time(directory, error) >= started && !error) {
+            return uncacheable(std::format("changed during the compilation: {}", directory.generic_string()));
+        }
     }
     entry.knownShadows = *shadows;
 

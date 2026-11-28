@@ -54,7 +54,11 @@ object. ccache's direct mode has this limit; cppmcache checks for it.
   in quotes is also a candidate beside the source and every recorded header, system headers
   included: a quoted test looks first beside the file where it is evaluated, which a macro defined
   in one header can make any other. Entries made before tested headers were recorded are not read
-  (format version 7). The scan works on preprocessing tokens, as the compiler forms them: lines are spliced
+  (format version 7). A dependency with a BMI's extension is skipped only if it is binary, as a BMI
+  is: a textual header so named is scanned. After the compilation, a file at one of the watched
+  places that is newer than its start, or a watched directory that changed since (a removal leaves
+  no other trace), means the state the compiler saw is unknown, and nothing is stored; the
+  directories that receive the outputs are left out, since writing them changes their date. The scan works on preprocessing tokens, as the compiler forms them: lines are spliced
   first, a comment is a space,
   a string or character literal is one token, and so is a header name after `#include` or
   `__has_include(`, where `//` and `/*` are characters of the name. An unterminated comment or raw

@@ -124,6 +124,7 @@ struct FileInfo {
     // `pastePieces` are the parts of the operator's name it writes where a paste could use them.
     std::vector<std::string> pastePieces;
     bool                     pasteJoin = false;
+    bool                     binary    = false;  // the content holds a NUL byte, as a BMI does and a textual header does not
 };
 
 // What `scanHeaderProbes` finds in a file.
@@ -534,13 +535,13 @@ public:
         const auto stamp   = std::chrono::duration_cast<std::chrono::nanoseconds>(modified.time_since_epoch()).count();
         const bool settled = fs::file_time_type::clock::now() - modified > std::chrono::seconds{2};
 
-        // "8": records made by an earlier scan of the header probes are not read.
+        // "9": records made by an earlier scan of the header probes are not read.
         const std::string statKey =
-            KeyHasher{}.field("8").field(absolute.generic_string()).field(std::to_string(size)).field(std::to_string(stamp)).finishHex();
+            KeyHasher{}.field("9").field(absolute.generic_string()).field(std::to_string(size)).field(std::to_string(stamp)).finishHex();
         const fs::path statPath = shard("stat", statKey);
         if (settled) {
             // Record: 64 hexadecimal digits, a space, the time-macro flag, a space, the digest's size,
-            // a space, then the computed-probe and paste-join flags; then one line per probed header
+            // a space, then the computed-probe, paste-join and binary flags; then one line per probed header
             // name, prefixed with "n ", one per name tested in quotes, prefixed with "q ",
             // and one per paste piece, prefixed with "p ".
             if (const auto cached = readFile(statPath); cached && cached->size() > 67 && (*cached)[64] == ' ' && (*cached)[66] == ' ') {
@@ -551,7 +552,7 @@ public:
                 const std::string_view digits     = first.substr(67);
                 const auto [sizeEnd, sizeError]   = std::from_chars(digits.data(), digits.data() + digits.size(), digestSize);
                 const std::string_view rest       = digits.substr(static_cast<std::size_t>(sizeEnd - digits.data()));
-                if (sizeError == std::errc{} && rest.size() == 3 && rest[0] == ' ' && std::ranges::all_of(rest.substr(1), [](char flag) {
+                if (sizeError == std::errc{} && rest.size() == 4 && rest[0] == ' ' && std::ranges::all_of(rest.substr(1), [](char flag) {
                         return flag == '0' || flag == '1';
                     })) {
                     FileInfo info;
@@ -559,6 +560,7 @@ public:
                     info.timeMacros    = (*cached)[65] == '1';
                     info.computedProbe = rest[1] == '1';
                     info.pasteJoin     = rest[2] == '1';
+                    info.binary        = rest[3] == '1';
                     if (firstEnd < record.size()) {
                         for (const auto line : std::views::split(record.substr(firstEnd + 1), '\n')) {
                             const std::string_view text{line.begin(), line.end()};
@@ -598,15 +600,17 @@ public:
         info.computedProbe = probes.computed;
         info.quotedProbes  = std::move(probes.quoted);
         info.pasteJoin     = probes.joins;
+        info.binary        = content->contains('\0');
         info.pastePieces   = std::move(probes.pieces);
         // Not memoised if the file changed size while it was being read.
         if (settled && content->size() == size) {
-            std::string record = std::format("{} {} {} {}{}",
+            std::string record = std::format("{} {} {} {}{}{}",
                                              info.digest.hash,
                                              info.timeMacros ? '1' : '0',
                                              info.digest.size,
                                              info.computedProbe ? '1' : '0',
-                                             info.pasteJoin ? '1' : '0');
+                                             info.pasteJoin ? '1' : '0',
+                                             info.binary ? '1' : '0');
             for (const auto& name : info.probedHeaders) {
                 record += "\nn " + name;
             }
