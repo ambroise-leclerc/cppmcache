@@ -58,6 +58,7 @@ struct Invocation {
     std::string                        moduleOutput;        // Clang, MSVC: BMI produced (-fmodule-output=, /ifcOutput), empty if absent
     std::map<std::string, std::string> moduleFiles;         // Clang, MSVC: -fmodule-file=name=path, /reference name=path
     std::vector<std::string>           includeDirectories;  // directories named by -I, -iquote, -isystem, -idirafter, /I…, in order
+    std::vector<std::string>           macroDefinitions;    // values of -D and /D, as written: NAME, NAME=VALUE
     std::string                        bypass;              // reason why the command is not cacheable, empty otherwise
     // With -fdeps-format=, GCC no longer writes the `name.c++-module` rules in the dependency file.
     bool makeModuleRules = true;
@@ -263,9 +264,15 @@ Invocation parseCommand(CompilerKind kind, const std::vector<std::string>& argum
                 if (std::ranges::contains(includeOptions, std::string_view{argument})) {
                     invocation.includeDirectories.push_back(arguments[i + 1]);
                 }
+                if (argument == "-D") {
+                    invocation.macroDefinitions.push_back(arguments[i + 1]);
+                }
                 invocation.keyArguments.push_back(arguments[++i]);
             }
         } else if (argument.front() == '-') {
+            if (argument.starts_with("-D") && argument.size() > 2) {
+                invocation.macroDefinitions.push_back(argument.substr(2));
+            }
             // -Idir, -isystemdir…: the directory is joined to the option.
             for (const auto option : includeOptions) {
                 if (argument.starts_with(option) && argument.size() > option.size()) {
@@ -415,6 +422,8 @@ Invocation parseMsvc(const std::vector<std::string>& arguments) {
             const std::string value = next();
             if (option == "I" || option == "external:I") {
                 invocation.includeDirectories.push_back(value);
+            } else if (option == "D") {
+                invocation.macroDefinitions.push_back(value);
             }
             invocation.keyArguments.push_back(std::format("/{}", option));
             invocation.keyArguments.push_back(value);
@@ -424,6 +433,8 @@ Invocation parseMsvc(const std::vector<std::string>& arguments) {
                 invocation.includeDirectories.emplace_back(option.substr(10));
             } else if (option.starts_with("I") && option.size() > 1) {
                 invocation.includeDirectories.emplace_back(option.substr(1));
+            } else if (option.starts_with("D") && option.size() > 1) {
+                invocation.macroDefinitions.emplace_back(option.substr(1));
             }
             invocation.keyArguments.push_back(std::format("/{}", option));
         }

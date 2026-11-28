@@ -240,4 +240,39 @@ build(uncached 1)
 file(WRITE "${WORK_DIR}/probe/flag.h" "")
 build(uncached 2)
 
+if(NOT FAMILY STREQUAL "msvc")
+    message(STATUS "15. the operator spelt by token pasting: what it tests cannot be followed, nothing is stored")
+    string(SUBSTRING "${has_include}" 0 6 has_prefix)
+    file(WRITE "${WORK_DIR}/src/paste.cpp"
+        "#include <cstdio>\n#define JOIN(a, b) a ## b\n#if JOIN(${has_prefix}, include)(\"flag.h\")\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n"
+        "int main() { std::printf(\"%d\\n\", VALUE); }\n")
+    file(REMOVE "${WORK_DIR}/probe/flag.h")
+    set(compile -std=c++23 -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/paste.cpp)
+    build(uncached 1)
+    file(WRITE "${WORK_DIR}/probe/flag.h" "")
+    build(uncached 2)
+
+    message(STATUS "15b. the operator renamed on the command line: nothing is stored")
+    file(WRITE "${WORK_DIR}/src/defined.cpp"
+        "#include <cstdio>\n#if HAS(\"flag.h\")\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n"
+        "int main() { std::printf(\"%d\\n\", VALUE); }\n")
+    file(REMOVE "${WORK_DIR}/probe/flag.h")
+    set(compile -std=c++23 -DHAS=${has_include} -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/defined.cpp)
+    build(uncached 1)
+    file(WRITE "${WORK_DIR}/probe/flag.h" "")
+    build(uncached 2)
+
+    message(STATUS "16. // inside an angle header name does not hide the test after it")
+    file(WRITE "${WORK_DIR}/src/slashes.cpp"
+        "#include <cstdio>\n#if ${has_include}(<a//b>) || ${has_include}(\"flag.h\")\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\n"
+        "int main() { std::printf(\"%d\\n\", VALUE); }\n")
+    file(REMOVE "${WORK_DIR}/probe/flag.h")
+    set(compile -std=c++23 -Iprobe -MD -MF out/main.o.d -o out/main.o -c src/slashes.cpp)
+    build(miss 1)
+    build(hit 1)
+    file(WRITE "${WORK_DIR}/probe/flag.h" "")
+    build(miss 2)
+    build(hit 2)
+endif()
+
 message(STATUS "header shadowing integration test (${FAMILY}) passed")

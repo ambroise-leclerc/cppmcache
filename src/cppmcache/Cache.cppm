@@ -444,11 +444,41 @@ bool ensureSearchPath(Context& context) {
     return false;
 }
 
+// The operator's names, split so that scanning this file finds nothing.
+constexpr std::string_view hasIncludeName     = "__has_"
+                                                "include";
+constexpr std::string_view hasIncludeNextName = "__has_"
+                                                "include_next";
+
+// Whether `name` is a concatenation of `pieces`, each used any number of times.
+bool spelledByPieces(std::string_view name, const std::vector<std::string>& pieces) {
+    std::vector<bool> reachable(name.size() + 1, false);
+    reachable[0] = true;
+    for (std::size_t at = 0; at < name.size(); ++at) {
+        if (!reachable[at]) {
+            continue;
+        }
+        for (const auto& piece : pieces) {
+            if (!piece.empty() && name.substr(at).starts_with(piece)) {
+                reachable[at + piece.size()] = true;
+            }
+        }
+    }
+    return reachable[name.size()];
+}
+
 // The files that exist now where a header shadowing one of the entry's dependencies would be, in
-// the form a manifest records them. Nothing if the search path of the compiler is unknown.
-std::optional<std::vector<std::string>> presentShadows(Context& context, const ManifestEntry& entry) {
-    if (!ensureSearchPath(context)) {
+// the form a manifest records them. Nothing if the search path of the compiler is unknown, or if a
+// `__has_include` test could look where no candidate is; `obstacle` then says which.
+std::optional<std::vector<std::string>> presentShadows(Context& context, const ManifestEntry& entry, std::string* obstacle = nullptr) {
+    const auto refuse = [&](std::string reason) -> std::optional<std::vector<std::string>> {
+        if (obstacle != nullptr) {
+            *obstacle = std::move(reason);
+        }
         return std::nullopt;
+    };
+    if (!ensureSearchPath(context)) {
+        return refuse("include search path unknown");
     }
     std::vector<std::string> headers;
     for (const auto& dependency : entry.dependencies) {
@@ -465,16 +495,59 @@ std::optional<std::vector<std::string>> presentShadows(Context& context, const M
         scanned.push_back(absoluteNormal(context.cwd, header));
     }
     std::vector<std::string> probedNames;
-    for (const auto& file : scanned) {
-        const auto info = context.store.fileInfo(file);
-        if (!info || info->computedProbe) {
-            return std::nullopt;
-        }
-        for (const auto& name : info->probedHeaders) {
+    std::string              joins;   // a file that pastes a macro argument into something that can spell the operator
+    std::vector<std::string> pieces;  // the parts of the operator's name written where a paste could use them
+    const auto               merge = [&](const std::vector<std::string>& names) {
+        for (const auto& name : names) {
             if (!std::ranges::contains(probedNames, name)) {
                 probedNames.push_back(name);
             }
         }
+    };
+    for (const auto& file : scanned) {
+        const auto info = context.store.fileInfo(file);
+        if (!info) {
+            return refuse(std::format("unreadable file: {}", file.generic_string()));
+        }
+        if (info->computedProbe) {
+            return refuse(std::format("__has_include with a computed operand in {}", file.generic_string()));
+        }
+        merge(info->probedHeaders);
+        if (joins.empty() && info->pasteJoin) {
+            joins = file.generic_string();
+        }
+        for (const auto& piece : info->pastePieces) {
+            if (!std::ranges::contains(pieces, piece)) {
+                pieces.push_back(piece);
+            }
+        }
+    }
+    // A macro defined on the command line is read like a `#define` line of a file.
+    for (const auto& definition : context.invocation.macroDefinitions) {
+        std::string line = definition;
+        if (const auto equals = line.find_first_of(context.kind == CompilerKind::msvc ? "=#" : "="); equals != std::string::npos) {
+            line[equals] = ' ';
+        } else {
+            line += " 1";
+        }
+        const auto probes = scanHeaderProbes(std::format("#define {}\n", line));
+        if (probes.computed) {
+            return refuse(std::format("__has_include with a computed operand in the definition of {}", definition));
+        }
+        merge(probes.names);
+        if (joins.empty() && probes.joins) {
+            joins = std::format("-D{}", definition);
+        }
+        for (const auto& piece : probes.pieces) {
+            if (!std::ranges::contains(pieces, piece)) {
+                pieces.push_back(piece);
+            }
+        }
+    }
+    // Pasting joins whole tokens: the operator can be built only if the pieces written somewhere
+    // spell it end to end.
+    if (!joins.empty() && (spelledByPieces(hasIncludeName, pieces) || spelledByPieces(hasIncludeNextName, pieces))) {
+        return refuse(std::format("__has_include may be built by token pasting, in {}", joins));
     }
     std::vector<std::string> present;
     std::error_code          error;
@@ -825,19 +898,12 @@ int compileAndStore(Context& context) {
     // What already sits where a shadowing header would be did not win this compilation. Without
     // the compiler's search path that cannot be told, and the result is not stored: an entry that
     // cannot be checked against a new header must not exist.
-    // A test whose header name a macro supplies could look anywhere: no set of places to watch
-    // covers it, so the result is not stored.
-    if (const auto sourceInfo = store.fileInfo(context.sourceAbsolute); sourceInfo && sourceInfo->computedProbe) {
-        return uncacheable("__has_include with a computed operand in the source");
-    }
-    for (const auto& dependency : entry.dependencies) {
-        if (const auto info = store.fileInfo(absoluteNormal(context.cwd, dependency.path)); info && info->computedProbe) {
-            return uncacheable(std::format("__has_include with a computed operand in {}", dependency.path));
-        }
-    }
-    const auto shadows = presentShadows(context, entry);
+    // A test whose header name a macro supplies, or whose operator is built or renamed, could look
+    // anywhere: no set of places to watch covers it, so the result is not stored.
+    std::string obstacle;
+    const auto  shadows = presentShadows(context, entry, &obstacle);
     if (!shadows) {
-        return uncacheable("include search path unknown");
+        return uncacheable(obstacle);
     }
     entry.knownShadows = *shadows;
 

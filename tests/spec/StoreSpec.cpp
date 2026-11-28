@@ -271,6 +271,36 @@ const speclab::Register probeAliases{"Storage: a name the operator is given else
                                              .Execute();
                                      }};
 
+const speclab::Register probeTokens{
+    "Storage: header names and token pasting, as the preprocessor reads them",
+    "unit,store,shadow",
+    [] {
+        return speclab::Test("STORE-010")
+            .Then("a header name is one token, and a paste that could spell the operator is reported",
+                  [] {
+                      const auto slashes = scanHeaderProbes("#if __has_"
+                                                            "include(<a//b>) || __has_"
+                                                            "include(\"c/*d\") || __has_"
+                                                            "include(\"e\\\")\n"
+                                                            "#include <f/*g>\n#if __has_"
+                                                            "include(<h.h>)\n#endif\n");
+                      const auto joiner  = scanHeaderProbes("#define JOIN(a, b) a ## b\n");
+                      const auto offered = scanHeaderProbes("#if JOIN(__has_, include)(\"flag.h\")\n#endif\n");
+                      const auto literal = scanHeaderProbes("#define HAS __has_ %:%: include\n");
+                      const auto suffix  = scanHeaderProbes("#define CHK(f) __ ## f ## _chk\n#define S s\n");
+                      Checks     checks;
+                      checks.expect(slashes.names == std::vector<std::string>{"a//b", "c/*d", "e\\", "h.h"} && !slashes.computed,
+                                    "// and /* inside a header name, and a backslash before its closing quote, are part of the name");
+                      checks.expect(joiner.joins && joiner.pieces.empty(), "pasting two arguments can spell anything");
+                      checks.expect(!offered.joins && offered.pieces == std::vector<std::string>{"__has_", "include"},
+                                    "the pieces handed to it in a condition are recorded");
+                      checks.expect(literal.computed, "a paste of written tokens that spells the operator, digraph included, is unknown");
+                      checks.expect(!suffix.joins && suffix.pieces == std::vector<std::string>{"s"}, "a paste that cannot end as the operator joins nothing");
+                      checks.raise();
+                  })
+            .Execute();
+    }};
+
 const speclab::Register probesMemo{"Storage: the memoised digest keeps the probed headers", "unit,store,shadow", [] {
                                        return speclab::Test<Sandbox>("STORE-007")
                                            .Given("two files old enough to be memoised, one with a literal test and one with a macro operand",

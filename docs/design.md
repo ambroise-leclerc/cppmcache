@@ -50,13 +50,22 @@ object. ccache's direct mode has this limit; cppmcache checks for it.
 - **Tested headers.** A header that `__has_include` or `__has_include_next` looks for changes the
   result whether it exists or not, and need not be read: no recorded file points to it. The source
   and every recorded header are therefore scanned for those tests, and each name they give is a
-  candidate in every search and project directory, whichever form it was written in. The scan
-  splices lines first and treats a comment as a space, as the preprocessor does; an unterminated
-  comment after the operator counts as a test it cannot read. The operator named in a comment or a
-  string or character literal is text, and is ignored. A test whose name comes from a macro could
-  look anywhere, and so could the operator under another name (`#define HAS __has_include`): the
-  operator is a test the scan can follow only when a call follows it, or when `#ifdef`, `#ifndef`
-  or `defined` only asks whether it exists. A compilation that reads anything else is not stored.
+  candidate in every search and project directory, whichever form it was written in. The scan works
+  on preprocessing tokens, as the compiler forms them: lines are spliced first, a comment is a space,
+  a string or character literal is one token, and so is a header name after `#include` or
+  `__has_include(`, where `//` and `/*` are characters of the name. An unterminated comment or raw
+  string counts as a test it cannot read. The operator named in a comment or a literal is text, and
+  is ignored. A test whose name comes from a macro could look anywhere, and so could the operator
+  under another name (`#define HAS __has_include`, or `-DHAS=__has_include`, since macros defined
+  on the command line are read too): the operator is a test the scan can follow only when a call
+  follows it, or when `#ifdef`, `#ifndef` or `defined` only asks whether it exists.
+- **Pasted operators.** `##` can build the operator from tokens written apart, possibly in different
+  files: `JOIN(__has_, include)`. Pasting joins whole tokens, so the scan records, in macro bodies
+  and `#if` conditions, the tokens that are parts of the operator's name, and whether a paste of a
+  macro argument could end as the operator. If one could, and the parts recorded across the
+  compilation spell the operator end to end, the compilation is not stored. A paste of written
+  tokens alone that spells it is refused directly. Standard library headers paste a lot, but write
+  few such parts, and stay cacheable.
 - **The check.** A manifest entry records which of those places were occupied when it was made. On
   lookup, the entry is valid only if exactly those are occupied: a file that appears can win an
   include or turn a test true, and one that disappears can turn a test false. The same list is part
